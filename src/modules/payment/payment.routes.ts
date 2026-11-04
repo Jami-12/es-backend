@@ -1,0 +1,68 @@
+import { Role } from "@prisma/client";
+import { Router } from "express";
+import { authenticate } from "../../middlewares/auth.middleware";
+import { authorize } from "../../middlewares/authorize.middleware";
+import { validate } from "../../middlewares/validate.middleware";
+import { idParamSchema } from "../../validations/common.validation";
+import {
+  confirmPaymentSchema,
+  failPaymentSchema,
+  initiatePaymentSchema,
+  paymentWebhookSchema,
+  reconcileCardPaymentSchema,
+} from "../../validations/payment.validation";
+import * as paymentController from "./payment.controller";
+
+const router = Router();
+
+router.get("/providers", paymentController.getProviderStatus);
+
+router.post(
+  "/webhook",
+  validate({ body: paymentWebhookSchema }),
+  paymentController.providerWebhook,
+);
+
+router.get("/bkash/callback", paymentController.providerCallback);
+router.post("/bkash/callback", paymentController.providerCallback);
+router.get("/nagad/callback", paymentController.providerCallback);
+router.post("/nagad/callback", paymentController.providerCallback);
+router.post("/card/webhook", paymentController.cardWebhook);
+
+router.use(authenticate);
+
+router.post(
+  "/initiate",
+  authorize([Role.CUSTOMER]),
+  validate({ body: initiatePaymentSchema }),
+  paymentController.initiatePayment,
+);
+
+router.post(
+  "/card/reconcile",
+  authorize([Role.CUSTOMER]),
+  validate({ body: reconcileCardPaymentSchema }),
+  paymentController.reconcileCardPayment,
+);
+
+router.get(
+  "/:id",
+  validate({ params: idParamSchema }),
+  paymentController.getPayment,
+);
+
+router.post(
+  "/:id/confirm",
+  authorize([Role.SUPER_ADMIN, Role.ADMIN]),
+  validate({ params: idParamSchema, body: confirmPaymentSchema }),
+  paymentController.confirmPayment,
+);
+
+router.post(
+  "/:id/fail",
+  authorize([Role.SUPER_ADMIN, Role.ADMIN]),
+  validate({ params: idParamSchema, body: failPaymentSchema }),
+  paymentController.failPayment,
+);
+
+export const paymentRoutes = router;
