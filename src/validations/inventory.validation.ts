@@ -19,7 +19,7 @@ export const adjustStockSchema = z
   .object({
     movementType: z.nativeEnum(InventoryMovementType),
     quantity: z.coerce.number().int().min(0).max(1_000_000),
-    reason: z.string().trim().max(500).optional(),
+    reason: z.string().trim().max(500).nullish(),
   })
   .refine(
     (value) =>

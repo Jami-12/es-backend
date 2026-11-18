@@ -16,6 +16,11 @@ export interface UpdateOrderStatusInput {
   status: OrderStatus;
 }
 
+export interface CollectCodPaymentInput {
+  note?: string;
+  reference?: string;
+}
+
 export interface OrderListQuery {
   page: number;
   limit: number;
@@ -71,6 +76,10 @@ export interface PaymentSummary {
   transactionId: string | null;
   providerReference: string | null;
   paidAt: string | null;
+  collectedById: string | null;
+  collectedByName: string | null;
+  collectedAt: string | null;
+  collectionNote: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -4,13 +4,20 @@ import {
   Role,
 } from "@prisma/client";
 import { prisma } from "../../config/prisma";
-import { deleteCloudinaryImage } from "../../config/cloudinary";
+import {
+  deleteCloudinaryImage,
+  isCloudinaryConfigured,
+} from "../../config/cloudinary";
 import { ApiError } from "../../utils/ApiError";
 import { recordAudit } from "../../utils/audit";
 import { toDecimal } from "../../utils/money";
 import { buildPaginationMeta } from "../../utils/pagination";
 import { resolveProductPricing } from "../../utils/productPricing";
-import { slugify } from "../../utils/slug";
+import {
+  generateUniqueSlug,
+  generateUniqueSku,
+  slugify,
+} from "../../utils/slug";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   CreateProductInput,
@@ -19,6 +26,7 @@ import type {
   ProductListQuery,
   ProductResponse,
   UpdateProductInput,
+  UpdateProductStatusInput,
 } from "../../types/product.types";
 
 const UUID_PATTERN =
@@ -99,6 +107,36 @@ const normalizeImages = (images: ProductImageInput[]) => {
 const canManageCatalog = (requester?: AuthenticatedUser): boolean =>
   requester?.role === Role.ADMIN || requester?.role === Role.SUPER_ADMIN;
 
+const isSlugTaken = async (
+  slug: string,
+  excludeProductId?: string,
+): Promise<boolean> => {
+  const product = await prisma.product.findFirst({
+    where: {
+      slug,
+      ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+    },
+    select: { id: true },
+  });
+
+  return product !== null;
+};
+
+const isSkuTaken = async (
+  sku: string,
+  excludeProductId?: string,
+): Promise<boolean> => {
+  const product = await prisma.product.findFirst({
+    where: {
+      sku,
+      ...(excludeProductId ? { id: { not: excludeProductId } } : {}),
+    },
+    select: { id: true },
+  });
+
+  return product !== null;
+};
+
 const toProductResponse = (
   product: ProductRecord,
   includeCosts = false,
@@ -135,6 +173,7 @@ const toProductResponse = (
     minimumStockLevel: product.minimumStockLevel,
     soldCount: product.soldCount,
     status: product.status,
+    isActive: product.status === ProductStatus.ACTIVE,
     isFeatured: product.isFeatured,
     isArchived: product.archivedAt !== null,
     archivedAt: product.archivedAt?.toISOString() ?? null,
@@ -282,13 +321,9 @@ export const createProduct = async (
   input: CreateProductInput,
   ipAddress?: string,
 ): Promise<ProductResponse> => {
-  const slug = slugify(input.slug ?? input.title);
-
-  if (!slug) {
+  if (input.slug !== undefined && !slugify(input.slug)) {
     throw ApiError.badRequest("Product slug is invalid");
   }
-
-  const sku = input.sku.trim();
 
   if (
     input.discountPrice !== undefined &&
@@ -298,23 +333,35 @@ export const createProduct = async (
     throw ApiError.badRequest("Discount price must be lower than the regular price");
   }
 
-  const duplicate = await prisma.product.findFirst({
-    where: { OR: [{ slug }, { sku }] },
-    select: { id: true, slug: true, sku: true },
-  });
+  const slug = await generateUniqueSlug(
+    input.slug ?? input.title,
+    (candidate) => isSlugTaken(candidate),
+  );
 
-  if (duplicate) {
-    throw ApiError.conflict(
-      duplicate.sku === sku
-        ? "A product with this SKU already exists"
-        : "A product with this slug already exists",
-    );
+  const providedSku = input.sku?.trim();
+
+  if (providedSku && (await isSkuTaken(providedSku))) {
+    throw ApiError.conflict("A product with this SKU already exists");
   }
+
+  const sku = providedSku || (await generateUniqueSku((candidate) => isSkuTaken(candidate)));
 
   await ensureCategoryExists(input.categoryId);
 
   const brandId = await resolveBrandId(input.brandId, input.brandName);
-  const images = buildProductImages(input.images, input.thumbnail);
+  const hasImages =
+    (input.images && input.images.length > 0) ||
+    Boolean(input.thumbnail?.trim());
+  const images = hasImages
+    ? buildProductImages(input.images, input.thumbnail)
+    : [];
+  const status = input.status ?? ProductStatus.ACTIVE;
+
+  if (images.length === 0 && status !== ProductStatus.DRAFT) {
+    throw ApiError.badRequest(
+      "At least one product image is required unless the product is saved as a draft",
+    );
+  }
 
   const product = await prisma.product.create({
     data: {
@@ -325,17 +372,19 @@ export const createProduct = async (
       shortDescription: input.shortDescription?.trim() || null,
       price: toDecimal(input.price),
       discountPrice:
-        input.discountPrice !== undefined
+        input.discountPrice !== undefined && input.discountPrice !== null
           ? toDecimal(input.discountPrice)
           : null,
       costPrice:
-        input.costPrice !== undefined ? toDecimal(input.costPrice) : null,
+        input.costPrice !== undefined && input.costPrice !== null
+          ? toDecimal(input.costPrice)
+          : null,
       purchasePrice: toDecimal(
         input.purchasePrice ?? input.costPrice ?? 0,
       ),
       stock: input.stock,
       minimumStockLevel: input.minimumStockLevel ?? 5,
-      status: input.status ?? ProductStatus.ACTIVE,
+      status: status,
       isFeatured: input.isFeatured ?? false,
       category: { connect: { id: input.categoryId } },
       brand: brandId ? { connect: { id: brandId } } : undefined,
@@ -373,19 +422,28 @@ export const listProducts = async (
 ): Promise<PaginatedProducts> => {
   const where: Prisma.ProductWhereInput = {};
   const canViewAllStatuses = canManageCatalog(requester);
+  const wantsInactive =
+    query.includeInactive === true ||
+    query.isActive === false ||
+    (query.status !== undefined && query.status !== ProductStatus.ACTIVE);
 
   if (!canViewAllStatuses) {
-    where.archivedAt = null;
-  }
-
-  if (query.status !== undefined) {
-    if (!canViewAllStatuses && query.status !== ProductStatus.ACTIVE) {
-      throw ApiError.forbidden("Only administrators can filter by product status");
+    if (wantsInactive) {
+      throw ApiError.forbidden(
+        "Only administrators can view or filter inactive products",
+      );
     }
 
-    where.status = query.status;
-  } else if (!canViewAllStatuses) {
+    where.archivedAt = null;
     where.status = ProductStatus.ACTIVE;
+  } else if (query.includeInactive) {
+    // Administrators explicitly requested products across all statuses.
+  } else if (query.status !== undefined) {
+    where.status = query.status;
+  } else if (typeof query.isActive === "boolean") {
+    where.status = query.isActive
+      ? ProductStatus.ACTIVE
+      : { not: ProductStatus.ACTIVE };
   }
 
   if (query.search) {
@@ -394,27 +452,44 @@ export const listProducts = async (
       { description: { contains: query.search, mode: "insensitive" } },
       { shortDescription: { contains: query.search, mode: "insensitive" } },
       { sku: { contains: query.search, mode: "insensitive" } },
+      { slug: { contains: query.search, mode: "insensitive" } },
+      {
+        category: {
+          is: { name: { contains: query.search, mode: "insensitive" } },
+        },
+      },
+      {
+        brand: {
+          is: { name: { contains: query.search, mode: "insensitive" } },
+        },
+      },
     ];
   }
 
-  if (query.category) {
-    if (UUID_PATTERN.test(query.category)) {
-      where.categoryId = query.category;
+  const categoryFilter = query.categoryId ?? query.category;
+
+  if (categoryFilter) {
+    if (UUID_PATTERN.test(categoryFilter)) {
+      where.categoryId = categoryFilter;
     } else {
-      where.category = { is: { slug: query.category } };
+      where.category = { is: { slug: categoryFilter } };
     }
   }
 
-  if (query.brand) {
-    if (UUID_PATTERN.test(query.brand)) {
-      where.brandId = query.brand;
+  const brandFilter = query.brandId ?? query.brand;
+
+  if (brandFilter) {
+    if (UUID_PATTERN.test(brandFilter)) {
+      where.brandId = brandFilter;
     } else {
-      where.brand = { is: { slug: query.brand } };
+      where.brand = { is: { slug: brandFilter } };
     }
   }
 
-  if (typeof query.featured === "boolean") {
-    where.isFeatured = query.featured;
+  const featuredFilter = query.isFeatured ?? query.featured;
+
+  if (typeof featuredFilter === "boolean") {
+    where.isFeatured = featuredFilter;
   }
 
   if (typeof query.inStock === "boolean") {
@@ -524,18 +599,25 @@ export const updateProduct = async (
     data.title = input.title.trim();
   }
 
-  if (input.slug !== undefined) {
-    const slug = slugify(input.slug);
-
-    if (!slug) {
+  if (input.slug !== undefined || input.title !== undefined) {
+    if (input.slug !== undefined && !slugify(input.slug)) {
       throw ApiError.badRequest("Product slug is invalid");
     }
 
-    data.slug = slug;
+    data.slug = await generateUniqueSlug(
+      input.slug ?? input.title!,
+      (candidate) => isSlugTaken(candidate, productId),
+    );
   }
 
   if (input.sku !== undefined) {
-    data.sku = input.sku.trim();
+    const sku = input.sku.trim();
+
+    if (await isSkuTaken(sku, productId)) {
+      throw ApiError.conflict("A product with this SKU already exists");
+    }
+
+    data.sku = sku;
   }
 
   if (input.description !== undefined) {
@@ -655,23 +737,6 @@ export const updateProduct = async (
     }
   }
 
-  if (data.slug !== undefined || data.sku !== undefined) {
-    const duplicate = await prisma.product.findFirst({
-      where: {
-        id: { not: productId },
-        OR: [
-          ...(typeof data.slug === "string" ? [{ slug: data.slug }] : []),
-          ...(typeof data.sku === "string" ? [{ sku: data.sku }] : []),
-        ],
-      },
-      select: { id: true },
-    });
-
-    if (duplicate) {
-      throw ApiError.conflict("A product with this slug or SKU already exists");
-    }
-  }
-
   const finalPrice =
     input.price !== undefined ? input.price : existing.price.toNumber();
   const finalDiscount =
@@ -734,6 +799,57 @@ export const updateProduct = async (
   return toProductResponse(product, true);
 };
 
+export const updateProductStatus = async (
+  actorId: string,
+  productId: string,
+  input: UpdateProductStatusInput,
+  ipAddress?: string,
+): Promise<ProductResponse> => {
+  const existing = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { id: true, title: true, status: true, archivedAt: true },
+  });
+
+  if (!existing) {
+    throw ApiError.notFound("Product not found");
+  }
+
+  const nextStatus =
+    input.status ??
+    (input.isActive === true ? ProductStatus.ACTIVE : ProductStatus.INACTIVE);
+
+  const product = await prisma.product.update({
+    where: { id: productId },
+    data: {
+      status: nextStatus,
+      ...(nextStatus === ProductStatus.ACTIVE ? { archivedAt: null } : {}),
+    },
+    include: productInclude,
+  });
+
+  await recordAudit({
+    userId: actorId,
+    action:
+      nextStatus === ProductStatus.ACTIVE
+        ? "ENABLE_PRODUCT"
+        : "DISABLE_PRODUCT",
+    entity: "Product",
+    entityId: product.id,
+    description: `Changed status for product ${product.title} from ${existing.status} to ${nextStatus}`,
+    oldData: {
+      status: existing.status,
+      archivedAt: existing.archivedAt?.toISOString() ?? null,
+    },
+    newData: {
+      status: product.status,
+      archivedAt: product.archivedAt?.toISOString() ?? null,
+    },
+    ipAddress,
+  });
+
+  return toProductResponse(product, true);
+};
+
 export const deleteProduct = async (
   actorId: string,
   productId: string,
@@ -748,35 +864,119 @@ export const deleteProduct = async (
     throw ApiError.notFound("Product not found");
   }
 
-  const archivedAt = new Date();
+  const isForeignKeyError = (error: unknown): boolean =>
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2003";
 
-  await prisma.$transaction([
-    prisma.product.update({
-      where: { id: productId },
-      data: {
-        status: ProductStatus.INACTIVE,
-        archivedAt,
-        isFeatured: false,
+  const archiveProduct = async (): Promise<void> => {
+    const archivedAt = new Date();
+
+    await prisma.$transaction(async (tx) => {
+      await tx.product.update({
+        where: { id: productId },
+        data: {
+          status: ProductStatus.INACTIVE,
+          archivedAt,
+          isFeatured: false,
+        },
+      });
+
+      await tx.productDiscount.updateMany({
+        where: { productId },
+        data: { isActive: false },
+      });
+
+      // Remove storefront references while keeping the product (and its order
+      // history) available to administrators.
+      await tx.cartItem.deleteMany({ where: { productId } });
+      await tx.wishlist.deleteMany({ where: { productId } });
+    });
+
+    await recordAudit({
+      userId: actorId,
+      action: "ARCHIVE_PRODUCT",
+      entity: "Product",
+      entityId: productId,
+      description: `Archived product ${product.title} because it appears in order history`,
+      oldData: {
+        id: product.id,
+        title: product.title,
+        status: product.status,
+        archivedAt: product.archivedAt?.toISOString() ?? null,
       },
-    }),
-    prisma.productDiscount.updateMany({
-      where: { productId },
-      data: { isActive: false },
-    }),
-  ]);
+      newData: {
+        id: productId,
+        title: product.title,
+        status: ProductStatus.INACTIVE,
+        archivedAt: archivedAt.toISOString(),
+      },
+      ipAddress,
+    });
+  };
+
+  const orderItemCount = await prisma.orderItem.count({
+    where: { productId },
+  });
+
+  if (orderItemCount > 0) {
+    await archiveProduct();
+    return;
+  }
+
+  const publicIds = product.images
+    .map((image) => image.publicId)
+    .filter((publicId): publicId is string => Boolean(publicId));
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Clear every dependent row explicitly so foreign keys never block the
+      // delete, even when database cascade rules are missing.
+      await tx.productDiscount.deleteMany({ where: { productId } });
+      await tx.review.deleteMany({ where: { productId } });
+      await tx.cartItem.deleteMany({ where: { productId } });
+      await tx.wishlist.deleteMany({ where: { productId } });
+      await tx.inventoryLog.deleteMany({ where: { productId } });
+      await tx.productImage.deleteMany({ where: { productId } });
+      await tx.product.delete({ where: { id: productId } });
+    });
+  } catch (error) {
+    // A concurrent order could reference the product between the count and the
+    // delete. Archive instead of surfacing a raw foreign-key error.
+    if (isForeignKeyError(error)) {
+      await archiveProduct();
+      return;
+    }
+
+    throw error;
+  }
+
+  if (isCloudinaryConfigured && publicIds.length > 0) {
+    await Promise.allSettled(
+      publicIds.map(async (publicId) => {
+        try {
+          await deleteCloudinaryImage(publicId);
+        } catch (error) {
+          console.error(
+            `Failed to delete Cloudinary image ${publicId}:`,
+            error,
+          );
+        }
+      }),
+    );
+  }
 
   await recordAudit({
     userId: actorId,
-    action: "ARCHIVE_PRODUCT",
+    action: "DELETE_PRODUCT",
     entity: "Product",
     entityId: productId,
-    description: `Archived product ${product.title}`,
-    oldData: product,
-    newData: {
-      id: productId,
+    description: `Deleted product ${product.title}`,
+    oldData: {
+      id: product.id,
       title: product.title,
-      status: ProductStatus.INACTIVE,
-      archivedAt: archivedAt.toISOString(),
+      slug: product.slug,
+      sku: product.sku,
+      status: product.status,
     },
     ipAddress,
   });

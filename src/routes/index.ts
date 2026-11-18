@@ -28,6 +28,8 @@ import { employeeRoutes } from "../modules/employee/employee.routes";
 import { salaryRoutes } from "../modules/salary/salary.routes";
 import { inventoryRoutes } from "../modules/inventory/inventory.routes";
 import { accountingRoutes } from "../modules/accounting/accounting.routes";
+import { bannerRoutes } from "../modules/banner/banner.routes";
+import { uploadRoutes } from "../modules/upload/upload.routes";
 
 const router = Router();
 
@@ -86,6 +88,8 @@ router.use("/products/:productId/images", productImageRoutes);
 router.use("/products/:productId/reviews", productReviewRoutes);
 router.use("/products/:productId/discount", productDiscountRoutes);
 router.use("/products", productRoutes);
+router.use("/banners", bannerRoutes);
+router.use("/uploads", uploadRoutes);
 router.use("/cart", cartRoutes);
 router.use("/wishlist", wishlistRoutes);
 router.use("/addresses", addressRoutes);

@@ -2,6 +2,7 @@ import type {
   CategoryListQuery,
   CreateCategoryInput,
   UpdateCategoryInput,
+  UpdateCategoryStatusInput,
 } from "../../types/category.types";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { sendSuccess } from "../../utils/ApiResponse";
@@ -55,6 +56,21 @@ export const updateCategory = asyncHandler(async (req, res) => {
   sendSuccess(res, {
     data: { category },
     message: "Category updated successfully",
+  });
+});
+
+export const updateCategoryStatus = asyncHandler(async (req, res) => {
+  const actor = getAuthUser(req);
+  const category = await categoryService.updateCategoryStatus(
+    actor.id,
+    req.params.id,
+    req.body as UpdateCategoryStatusInput,
+    req.ip,
+  );
+
+  sendSuccess(res, {
+    data: { category },
+    message: "Category status updated successfully",
   });
 });
 

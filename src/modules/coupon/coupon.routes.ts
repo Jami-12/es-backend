@@ -8,6 +8,7 @@ import {
   couponListQuerySchema,
   createCouponSchema,
   updateCouponSchema,
+  updateCouponStatusSchema,
   validateCouponSchema,
 } from "../../validations/coupon.validation";
 import * as couponController from "./coupon.controller";
@@ -18,7 +19,6 @@ router.use(authenticate);
 
 router.post(
   "/validate",
-  authorize([Role.CUSTOMER]),
   validate({ body: validateCouponSchema }),
   couponController.validateCoupon,
 );
@@ -42,6 +42,20 @@ router.post(
   authorize([Role.SUPER_ADMIN, Role.ADMIN]),
   validate({ body: createCouponSchema }),
   couponController.createCoupon,
+);
+
+router.put(
+  "/:id",
+  authorize([Role.SUPER_ADMIN, Role.ADMIN]),
+  validate({ params: idParamSchema, body: updateCouponSchema }),
+  couponController.updateCoupon,
+);
+
+router.patch(
+  "/:id/status",
+  authorize([Role.SUPER_ADMIN, Role.ADMIN]),
+  validate({ params: idParamSchema, body: updateCouponStatusSchema }),
+  couponController.updateCouponStatus,
 );
 
 router.patch(

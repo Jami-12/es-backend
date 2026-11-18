@@ -2,6 +2,7 @@ import type {
   CreateProductInput,
   ProductListQuery,
   UpdateProductInput,
+  UpdateProductStatusInput,
 } from "../../types/product.types";
 import { sendSuccess } from "../../utils/ApiResponse";
 import { asyncHandler } from "../../utils/asyncHandler";
@@ -68,6 +69,21 @@ export const updateProduct = asyncHandler(async (req, res) => {
   sendSuccess(res, {
     data: { product },
     message: "Product updated successfully",
+  });
+});
+
+export const updateProductStatus = asyncHandler(async (req, res) => {
+  const actor = getAuthUser(req);
+  const product = await productService.updateProductStatus(
+    actor.id,
+    req.params.id,
+    req.body as UpdateProductStatusInput,
+    req.ip,
+  );
+
+  sendSuccess(res, {
+    data: { product },
+    message: "Product status updated successfully",
   });
 });
 

@@ -15,16 +15,16 @@ const dateStringSchema = z
 export const createInvestmentSchema = z.object({
   amount: amountSchema,
   source: z.string().trim().min(2).max(200),
-  description: z.string().trim().max(2000).optional(),
-  investmentDate: dateStringSchema.optional(),
+  description: z.string().trim().max(2000).nullish(),
+  investmentDate: dateStringSchema.nullish(),
 });
 
 export const updateInvestmentSchema = z
   .object({
     amount: amountSchema.optional(),
     source: z.string().trim().min(2).max(200).optional(),
-    description: z.string().trim().max(2000).nullable().optional(),
-    investmentDate: dateStringSchema.optional(),
+    description: z.string().trim().max(2000).nullish(),
+    investmentDate: dateStringSchema.nullish(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one field must be provided for update",

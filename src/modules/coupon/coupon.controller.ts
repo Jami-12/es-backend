@@ -2,6 +2,7 @@ import type {
   CouponListQuery,
   CreateCouponInput,
   UpdateCouponInput,
+  UpdateCouponStatusInput,
   ValidateCouponInput,
 } from "../../types/coupon.types";
 import { sendSuccess } from "../../utils/ApiResponse";
@@ -59,6 +60,21 @@ export const updateCoupon = asyncHandler(async (req, res) => {
   });
 });
 
+export const updateCouponStatus = asyncHandler(async (req, res) => {
+  const actor = getAuthUser(req);
+  const coupon = await couponService.updateCouponStatus(
+    actor.id,
+    req.params.id,
+    req.body as UpdateCouponStatusInput,
+    req.ip,
+  );
+
+  sendSuccess(res, {
+    data: { coupon },
+    message: "Coupon status updated successfully",
+  });
+});
+
 export const deleteCoupon = asyncHandler(async (req, res) => {
   const actor = getAuthUser(req);
   await couponService.deleteCoupon(actor.id, req.params.id, req.ip);
@@ -72,7 +88,11 @@ export const deleteCoupon = asyncHandler(async (req, res) => {
 export const validateCoupon = asyncHandler(async (req, res) => {
   const user = getAuthUser(req);
   const input = req.body as ValidateCouponInput;
-  const result = await couponService.validateCouponForUser(user.id, input.code);
+  const result = await couponService.validateCouponForUser(
+    user.id,
+    input.code,
+    input.subtotal,
+  );
 
   sendSuccess(res, {
     data: result,

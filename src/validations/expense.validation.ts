@@ -1,6 +1,8 @@
 import { ExpenseCategory, ExpenseStatus } from "@prisma/client";
 import { z } from "zod";
 
+import { booleanishSchema } from "./helpers";
+
 const amountSchema = z.coerce
   .number()
   .finite("Amount must be a valid number")
@@ -16,11 +18,11 @@ const dateStringSchema = z
 export const createExpenseSchema = z.object({
   category: z.nativeEnum(ExpenseCategory),
   amount: amountSchema,
-  description: z.string().trim().max(2000).optional(),
-  expenseDate: dateStringSchema.optional(),
-  dueDate: dateStringSchema.optional(),
-  isPaid: z.boolean().optional(),
-  receiptUrl: z.string().trim().max(2000).optional(),
+  description: z.string().trim().max(2000).nullish(),
+  expenseDate: dateStringSchema.nullish(),
+  dueDate: dateStringSchema.nullish(),
+  isPaid: booleanishSchema.optional(),
+  receiptUrl: z.string().trim().max(2000).nullish(),
   status: z.nativeEnum(ExpenseStatus).optional(),
 });
 
@@ -28,11 +30,11 @@ export const updateExpenseSchema = z
   .object({
     category: z.nativeEnum(ExpenseCategory).optional(),
     amount: amountSchema.optional(),
-    description: z.string().trim().max(2000).nullable().optional(),
-    expenseDate: dateStringSchema.optional(),
-    dueDate: dateStringSchema.nullable().optional(),
-    isPaid: z.boolean().optional(),
-    receiptUrl: z.string().trim().max(2000).nullable().optional(),
+    description: z.string().trim().max(2000).nullish(),
+    expenseDate: dateStringSchema.nullish(),
+    dueDate: dateStringSchema.nullish(),
+    isPaid: booleanishSchema.optional(),
+    receiptUrl: z.string().trim().max(2000).nullish(),
     status: z.nativeEnum(ExpenseStatus).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {

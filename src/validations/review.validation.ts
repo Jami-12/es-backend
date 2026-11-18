@@ -8,13 +8,13 @@ const ratingSchema = z.coerce
 
 export const createReviewSchema = z.object({
   rating: ratingSchema,
-  comment: z.string().trim().max(3000).optional(),
+  comment: z.string().trim().max(3000).nullish(),
 });
 
 export const updateReviewSchema = z
   .object({
     rating: ratingSchema.optional(),
-    comment: z.string().trim().max(3000).nullable().optional(),
+    comment: z.string().trim().max(3000).nullish(),
     isApproved: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {

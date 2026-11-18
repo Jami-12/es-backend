@@ -134,6 +134,14 @@ const currencySchema = z
   .regex(/^[A-Za-z]{3}$/, "Must be a three-letter ISO currency code")
   .transform((value) => value.toUpperCase());
 
+// Optional currency overrides are commonly left blank in .env files. Treat an
+// empty value as "not configured" so it falls back to STORE_CURRENCY instead
+// of failing startup validation.
+const optionalCurrencySchema = z.preprocess(
+  emptyToUndefined,
+  currencySchema.optional(),
+);
+
 const envSchema = z
   .object({
     NODE_ENV: z
@@ -206,6 +214,7 @@ const envSchema = z
     BKASH_CALLBACK_URL: optionalUrl,
 
     NAGAD_ENABLED: booleanFromEnv.default(false),
+    NAGAD_SIMULATION: booleanFromEnv.default(false),
     NAGAD_BASE_URL: optionalUrl,
     NAGAD_MERCHANT_ID: optionalString,
     NAGAD_MERCHANT_NUMBER: optionalString,
@@ -217,13 +226,13 @@ const envSchema = z
     STRIPE_SECRET_KEY: optionalString,
     STRIPE_PUBLISHABLE_KEY: optionalString,
     STRIPE_WEBHOOK_SECRET: optionalString,
-    STRIPE_CURRENCY: currencySchema.optional(),
+    STRIPE_CURRENCY: optionalCurrencySchema,
 
     CARD_PROVIDER: optionalString,
     CARD_SECRET_KEY: optionalString,
     CARD_PUBLISHABLE_KEY: optionalString,
     CARD_WEBHOOK_SECRET: optionalString,
-    CARD_CURRENCY: currencySchema.optional(),
+    CARD_CURRENCY: optionalCurrencySchema,
 
     CLOUDINARY_ENABLED: booleanFromEnv.default(false),
     CLOUDINARY_CLOUD_NAME: optionalString,
@@ -300,7 +309,12 @@ const envSchema = z
       ["BKASH_CALLBACK_URL", value.BKASH_CALLBACK_URL],
     ]);
 
-    requireWhenEnabled(value.NAGAD_ENABLED, "Nagad", [
+    const nagadSimulation =
+      value.NAGAD_ENABLED &&
+      value.NAGAD_SIMULATION &&
+      value.NODE_ENV !== "production";
+
+    requireWhenEnabled(value.NAGAD_ENABLED && !nagadSimulation, "Nagad", [
       ["NAGAD_BASE_URL", value.NAGAD_BASE_URL],
       ["NAGAD_MERCHANT_ID", value.NAGAD_MERCHANT_ID],
       ["NAGAD_MERCHANT_NUMBER", value.NAGAD_MERCHANT_NUMBER],
@@ -330,6 +344,55 @@ const envSchema = z
       ["CLOUDINARY_API_KEY", value.CLOUDINARY_API_KEY],
       ["CLOUDINARY_API_SECRET", value.CLOUDINARY_API_SECRET],
     ]);
+
+    if (
+      (value.BKASH_ENABLED || value.NAGAD_ENABLED) &&
+      value.STORE_CURRENCY !== "BDT"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["STORE_CURRENCY"],
+        message:
+          "STORE_CURRENCY must be BDT while bKash or Nagad is enabled; both providers are integrated for BDT only",
+      });
+    }
+
+    const configuredStripeCurrency =
+      value.STRIPE_CURRENCY ?? value.CARD_CURRENCY;
+
+    if (
+      stripeEnabled &&
+      configuredStripeCurrency &&
+      configuredStripeCurrency !== value.STORE_CURRENCY
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["STRIPE_CURRENCY"],
+        message:
+          "STRIPE_CURRENCY must match STORE_CURRENCY so the charged amount matches the order total",
+      });
+    }
+
+    if (value.BKASH_ENABLED && value.BKASH_BASE_URL) {
+      try {
+        const host = new URL(value.BKASH_BASE_URL).hostname.toLowerCase();
+        const sandboxHosts = new Set([
+          "tokenized.sandbox.bka.sh",
+          "sandbox.bka.sh",
+        ]);
+
+        if (value.NODE_ENV !== "production" && !sandboxHosts.has(host)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["BKASH_BASE_URL"],
+            message:
+              "BKASH_BASE_URL must use the official bKash Tokenized Checkout sandbox host (https://tokenized.sandbox.bka.sh/v1.2.0-beta) outside production",
+          });
+        }
+      } catch {
+        // optionalUrl already reports malformed URLs.
+      }
+    }
   });
 
 const parsed = envSchema.safeParse(process.env);
@@ -372,3 +435,26 @@ export const env = {
 } as const;
 
 export type AppEnv = typeof env;
+
+if (env.STRIPE_ENABLED && !env.STRIPE_PUBLISHABLE_KEY) {
+  console.warn(
+    "[payment-config] STRIPE_ENABLED is true but STRIPE_PUBLISHABLE_KEY is missing. The storefront cannot initialise Stripe Elements without a publishable key.",
+  );
+}
+
+if (env.NAGAD_ENABLED && env.NAGAD_BASE_URL) {
+  try {
+    const nagadUrl = new URL(env.NAGAD_BASE_URL);
+
+    if (
+      nagadUrl.hostname.toLowerCase() === "sandbox.mynagad.com" &&
+      nagadUrl.protocol === "https:"
+    ) {
+      console.warn(
+        "[payment-config] The classic Nagad sandbox endpoint uses http://sandbox.mynagad.com:10080. Verify NAGAD_BASE_URL against the endpoint issued in your merchant documentation.",
+      );
+    }
+  } catch {
+    // optionalUrl already validates malformed URLs.
+  }
+}

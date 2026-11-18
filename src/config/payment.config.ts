@@ -5,6 +5,32 @@ const clean = (value: string | undefined): string | undefined => {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 };
 
+const cleanBaseUrl = (
+  value: string | undefined,
+  endpointSuffixes: string[],
+): string | undefined => {
+  const trimmed = clean(value);
+
+  if (!trimmed) {
+    return undefined;
+  }
+
+  let normalized = trimmed.replace(/\/+$/, "");
+
+  // Accept a full endpoint pasted by mistake and reduce it to the base path
+  // that the provider client appends its endpoint segments to.
+  for (const suffix of endpointSuffixes) {
+    if (normalized.toLowerCase().endsWith(suffix.toLowerCase())) {
+      normalized = normalized
+        .slice(0, normalized.length - suffix.length)
+        .replace(/\/+$/, "");
+      break;
+    }
+  }
+
+  return normalized || undefined;
+};
+
 const sandboxBkashBaseUrl = "https://tokenized.sandbox.bka.sh/v1.2.0-beta";
 const sandboxNagadBaseUrl =
   "http://sandbox.mynagad.com:10080/remote-payment-gateway-1.0/api/dfs";
@@ -12,7 +38,7 @@ const sandboxNagadBaseUrl =
 export const bkashConfig = {
   enabled: env.BKASH_ENABLED,
   baseUrl:
-    clean(env.BKASH_BASE_URL) ??
+    cleanBaseUrl(env.BKASH_BASE_URL, ["/tokenized/checkout"]) ??
     (env.isDevelopment && env.BKASH_ENABLED ? sandboxBkashBaseUrl : undefined),
   appKey: clean(env.BKASH_APP_KEY),
   appSecret: clean(env.BKASH_APP_SECRET),
@@ -34,8 +60,9 @@ export const isBkashConfigured = (): boolean =>
 
 export const nagadConfig = {
   enabled: env.NAGAD_ENABLED,
+  simulation: env.NAGAD_SIMULATION,
   baseUrl:
-    clean(env.NAGAD_BASE_URL) ??
+    cleanBaseUrl(env.NAGAD_BASE_URL, ["/check-out"]) ??
     (env.isDevelopment && env.NAGAD_ENABLED ? sandboxNagadBaseUrl : undefined),
   merchantId: clean(env.NAGAD_MERCHANT_ID),
   merchantNumber: clean(env.NAGAD_MERCHANT_NUMBER),
@@ -44,7 +71,15 @@ export const nagadConfig = {
   callbackUrl: clean(env.NAGAD_CALLBACK_URL),
 } as const;
 
+/**
+ * True when the dev-only Nagad simulation is active. It is never allowed in
+ * production so a mock gateway can never take payments in a live environment.
+ */
+export const isNagadSimulationEnabled = (): boolean =>
+  Boolean(env.NAGAD_ENABLED && env.NAGAD_SIMULATION && !env.isProduction);
+
 export const isNagadConfigured = (): boolean =>
+  isNagadSimulationEnabled() ||
   Boolean(
     env.NAGAD_ENABLED &&
       nagadConfig.baseUrl &&

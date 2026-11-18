@@ -1,6 +1,8 @@
 import { SalaryStatus } from "@prisma/client";
 import { z } from "zod";
 
+import { emptyToUndefined } from "./helpers";
+
 const amountSchema = z.coerce
   .number()
   .finite("Amount must be a valid number")
@@ -19,15 +21,18 @@ const dateStringSchema = z
   .min(1)
   .refine((value) => !Number.isNaN(Date.parse(value)), "Invalid date");
 
+const optionalValue = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(emptyToUndefined, schema.optional());
+
 export const createSalaryPaymentSchema = z.object({
   employeeId: z.string().uuid("Invalid employee id"),
   month: z.coerce.number().int().min(1).max(12),
   year: z.coerce.number().int().min(2000).max(2100),
-  amount: amountSchema.optional(),
-  bonus: adjustmentSchema.optional(),
-  deduction: adjustmentSchema.optional(),
-  paymentDate: dateStringSchema.optional(),
-  notes: z.string().trim().max(2000).optional(),
+  amount: optionalValue(amountSchema),
+  bonus: optionalValue(adjustmentSchema),
+  deduction: optionalValue(adjustmentSchema),
+  paymentDate: optionalValue(dateStringSchema),
+  notes: z.string().trim().max(2000).nullish(),
   status: z.nativeEnum(SalaryStatus).optional(),
 });
 

@@ -60,3 +60,27 @@ export interface UserResponse {
 }
 
 export type PaginatedUsers = PaginatedResult<UserResponse>;
+
+export interface CustomerListQuery {
+  page: number;
+  limit: number;
+  status?: UserStatus;
+  search?: string;
+  sortOrder: "asc" | "desc";
+}
+
+export interface CustomerSummary {
+  id: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  status: UserStatus;
+  isActive: boolean;
+  orderCount: number;
+  paidOrderCount: number;
+  totalSpent: number;
+  lastOrderAt: string | null;
+  createdAt: string;
+}
+
+export type PaginatedCustomers = PaginatedResult<CustomerSummary>;

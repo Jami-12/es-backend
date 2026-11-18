@@ -1,5 +1,6 @@
 import type {
   CheckoutInput,
+  CollectCodPaymentInput,
   OrderListQuery,
   UpdateOrderStatusInput,
 } from "../../types/order.types";
@@ -34,6 +35,8 @@ export const listMyOrders = asyncHandler(async (req, res) => {
     message: "Orders retrieved successfully",
   });
 });
+
+export const listOrders = listMyOrders;
 
 export const getOrder = asyncHandler(async (req, res) => {
   const user = getAuthUser(req);
@@ -90,5 +93,20 @@ export const adminUpdateOrderStatus = asyncHandler(async (req, res) => {
   sendSuccess(res, {
     data: { order },
     message: "Order status updated successfully",
+  });
+});
+
+export const adminCollectCodPayment = asyncHandler(async (req, res) => {
+  const user = getAuthUser(req);
+  const order = await orderService.collectCashOnDeliveryPayment(
+    user,
+    req.params.id,
+    req.body as CollectCodPaymentInput,
+    req.ip,
+  );
+
+  sendSuccess(res, {
+    data: { order },
+    message: "Cash on delivery collected and payment marked as paid",
   });
 });

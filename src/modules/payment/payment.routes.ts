@@ -25,8 +25,11 @@ router.post(
 
 router.get("/bkash/callback", paymentController.providerCallback);
 router.post("/bkash/callback", paymentController.providerCallback);
+router.post("/bkash/create", paymentController.createBkashPayment);
+router.get("/bkash/create", paymentController.createBkashPayment);
 router.get("/nagad/callback", paymentController.providerCallback);
 router.post("/nagad/callback", paymentController.providerCallback);
+router.get("/nagad/simulate", paymentController.nagadSimulationPage);
 router.post("/card/webhook", paymentController.cardWebhook);
 
 router.use(authenticate);

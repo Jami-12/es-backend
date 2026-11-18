@@ -31,7 +31,7 @@ export const registerSchema = z.object({
   name: nameSchema,
   email: emailSchema,
   password: passwordSchema,
-  phone: phoneSchema.optional(),
+  phone: phoneSchema.nullish(),
 });
 
 export const loginSchema = z.object({

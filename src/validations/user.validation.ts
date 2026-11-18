@@ -1,6 +1,8 @@
 import { Role, UserStatus } from "@prisma/client";
 import { z } from "zod";
 
+import { booleanishSchema } from "./helpers";
+
 const nameSchema = z
   .string()
   .trim()
@@ -43,7 +45,7 @@ export const createAdminSchema = z.object({
   name: nameSchema,
   email: emailSchema,
   password: passwordSchema,
-  phone: phoneSchema.optional(),
+  phone: phoneSchema.nullish(),
 });
 
 export const updateUserSchema = z
@@ -74,7 +76,7 @@ export const updateUserRoleSchema = z.object({
 export const updateUserStatusSchema = z
   .object({
     status: z.nativeEnum(UserStatus).optional(),
-    isActive: z.boolean().optional(),
+    isActive: booleanishSchema.optional(),
   })
   .refine((value) => value.status !== undefined || value.isActive !== undefined, {
     message: "Provide status or isActive",
@@ -90,5 +92,13 @@ export const userListQuerySchema = z.object({
   email: z.string().trim().max(255).optional(),
   search: z.string().trim().max(200).optional(),
   includeDeleted: booleanQuerySchema.default(false),
+  sortOrder: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const customerListQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  status: z.nativeEnum(UserStatus).optional(),
+  search: z.string().trim().max(200).optional(),
   sortOrder: z.enum(["asc", "desc"]).default("desc"),
 });

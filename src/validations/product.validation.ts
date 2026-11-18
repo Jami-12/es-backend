@@ -1,6 +1,14 @@
 import { DiscountType, ProductStatus } from "@prisma/client";
 import { z } from "zod";
 
+import {
+  booleanishSchema,
+  emptyToUndefined,
+  nullableTextSchema,
+  optionalInputSchema,
+  optionalTextSchema,
+} from "./helpers";
+
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -37,19 +45,48 @@ const scaleSchema = z.coerce
   .min(0.0001, "Scale must be greater than zero")
   .max(1000, "Scale is too large");
 
-const imageUrlSchema = z
-  .string()
-  .trim()
-  .min(1, "Image URL cannot be empty")
-  .max(2000);
+const booleanQuerySchema = z.preprocess((value) => {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+
+    if (["true", "1", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+
+    if (["false", "0", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return value;
+}, z.boolean());
+
+const imageUrlSchema = z.string().trim().max(2000);
+
+const thumbnailSchema = z.preprocess(
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? null : value,
+  z
+    .string()
+    .trim()
+    .min(1, "Thumbnail cannot be empty")
+    .max(2000)
+    .nullable()
+    .optional(),
+);
+
+const modelUrlSchema = z.preprocess(
+  (value) => (value === "" ? null : value),
+  z.string().trim().max(2000).nullable().optional(),
+);
 
 const imageSchema = z
   .object({
-    url: imageUrlSchema.optional(),
-    imageUrl: imageUrlSchema.optional(),
-    publicId: z.string().trim().max(255).optional(),
-    altText: z.string().trim().max(255).optional(),
-    isPrimary: z.boolean().optional(),
+    url: imageUrlSchema.nullish(),
+    imageUrl: imageUrlSchema.nullish(),
+    publicId: z.string().trim().max(255).nullish(),
+    altText: z.string().trim().max(255).nullish(),
+    isPrimary: booleanishSchema.optional(),
     sortOrder: z.coerce.number().int().min(0).max(1000).optional(),
   })
   .superRefine((value, ctx) => {
@@ -133,22 +170,18 @@ const productPayloadSchema = z
       .trim()
       .min(2, "Title must contain at least 2 characters")
       .max(200, "Title must contain at most 200 characters"),
-    slug: z.string().trim().min(2).max(220).optional(),
-    sku: z
-      .string()
-      .trim()
-      .min(1, "SKU is required")
-      .max(80, "SKU must contain at most 80 characters"),
+    slug: optionalTextSchema(2, 220, "Slug"),
+    sku: optionalTextSchema(1, 80, "SKU"),
     description: z
       .string()
       .trim()
       .min(10, "Description must contain at least 10 characters")
       .max(20_000, "Description must contain at most 20000 characters"),
-    shortDescription: z.string().trim().max(500).optional(),
+    shortDescription: z.string().trim().max(500).nullish(),
     price: positiveMoneySchema,
-    discountPrice: moneySchema.optional(),
-    costPrice: moneySchema.optional(),
-    purchasePrice: moneySchema.optional(),
+    discountPrice: optionalInputSchema(moneySchema),
+    costPrice: optionalInputSchema(moneySchema),
+    purchasePrice: optionalInputSchema(moneySchema),
     stock: z.coerce
       .number()
       .int("Stock must be an integer")
@@ -156,11 +189,11 @@ const productPayloadSchema = z
       .max(10_000_000, "Stock is too large"),
     minimumStockLevel: z.coerce.number().int().min(0).max(1_000_000).optional(),
     status: z.nativeEnum(ProductStatus).optional(),
-    isFeatured: z.boolean().optional(),
+    isFeatured: booleanishSchema.optional(),
     categoryId: z.string().uuid("Invalid category id"),
-    brandId: z.string().uuid("Invalid brand id").optional(),
-    brandName: z.string().trim().min(1).max(120).optional(),
-    modelUrl: z.string().trim().max(2000).optional(),
+    brandId: z.string().uuid("Invalid brand id").nullish(),
+    brandName: nullableTextSchema(120, "Brand name"),
+    modelUrl: modelUrlSchema.default(null),
     positionX: coordinateSchema.default(0),
     positionY: coordinateSchema.default(0),
     positionZ: coordinateSchema.default(0),
@@ -168,16 +201,20 @@ const productPayloadSchema = z
     rotationY: rotationSchema.default(0),
     rotationZ: rotationSchema.default(0),
     scale: scaleSchema.default(1),
-    images: z
-      .array(imageSchema)
-      .min(1, "At least one product image is required")
-      .max(20, "A product can have at most 20 images")
-      .optional(),
-    thumbnail: z.string().trim().min(1).max(2000).optional(),
+    images: z.preprocess(
+      emptyToUndefined,
+      z
+        .array(imageSchema)
+        .min(1, "At least one product image is required")
+        .max(20, "A product can have at most 20 images")
+        .optional(),
+    ),
+    thumbnail: thumbnailSchema,
   })
   .superRefine((value, ctx) => {
     if (
       value.discountPrice !== undefined &&
+      value.discountPrice !== null &&
       value.discountPrice >= value.price
     ) {
       ctx.addIssue({
@@ -187,11 +224,12 @@ const productPayloadSchema = z
       });
     }
 
-    if (!value.images && !value.thumbnail) {
+    if (!value.images && !value.thumbnail && value.status !== ProductStatus.DRAFT) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["images"],
-        message: "Provide at least one product image or a thumbnail",
+        message:
+          "Provide at least one product image or a thumbnail, or save the product as a draft",
       });
     }
 
@@ -214,14 +252,14 @@ export const updateProductSchema = z.preprocess(
   z
     .object({
       title: z.string().trim().min(2).max(200).optional(),
-      slug: z.string().trim().min(2).max(220).optional(),
-      sku: z.string().trim().min(1).max(80).optional(),
+      slug: optionalTextSchema(2, 220, "Slug"),
+      sku: optionalTextSchema(1, 80, "SKU"),
       description: z.string().trim().min(10).max(20_000).optional(),
-      shortDescription: z.string().trim().max(500).nullable().optional(),
+      shortDescription: z.string().trim().max(500).nullish(),
       price: positiveMoneySchema.optional(),
-      discountPrice: moneySchema.nullable().optional(),
-      costPrice: moneySchema.nullable().optional(),
-      purchasePrice: moneySchema.nullable().optional(),
+      discountPrice: optionalInputSchema(moneySchema),
+      costPrice: optionalInputSchema(moneySchema),
+      purchasePrice: optionalInputSchema(moneySchema),
       stock: z.coerce.number().int().min(0).max(10_000_000).optional(),
       minimumStockLevel: z.coerce
         .number()
@@ -230,11 +268,11 @@ export const updateProductSchema = z.preprocess(
         .max(1_000_000)
         .optional(),
       status: z.nativeEnum(ProductStatus).optional(),
-      isFeatured: z.boolean().optional(),
+      isFeatured: booleanishSchema.optional(),
       categoryId: z.string().uuid("Invalid category id").optional(),
-      brandId: z.string().uuid("Invalid brand id").nullable().optional(),
-      brandName: z.string().trim().min(1).max(120).nullable().optional(),
-      modelUrl: z.string().trim().max(2000).nullable().optional(),
+      brandId: z.string().uuid("Invalid brand id").nullish(),
+      brandName: nullableTextSchema(120, "Brand name"),
+      modelUrl: modelUrlSchema,
       positionX: coordinateSchema.optional(),
       positionY: coordinateSchema.optional(),
       positionZ: coordinateSchema.optional(),
@@ -242,8 +280,11 @@ export const updateProductSchema = z.preprocess(
       rotationY: rotationSchema.optional(),
       rotationZ: rotationSchema.optional(),
       scale: scaleSchema.optional(),
-      images: z.array(imageSchema).min(1).max(20).optional(),
-      thumbnail: z.string().trim().min(1).max(2000).nullable().optional(),
+      images: z.preprocess(
+        emptyToUndefined,
+        z.array(imageSchema).min(1).max(20).optional(),
+      ),
+      thumbnail: thumbnailSchema,
     })
     .superRefine((value, ctx) => {
       if (
@@ -272,6 +313,18 @@ export const updateProductSchema = z.preprocess(
     }),
 );
 
+export const updateProductStatusSchema = z
+  .object({
+    status: z.nativeEnum(ProductStatus).optional(),
+    isActive: booleanishSchema.optional(),
+  })
+  .refine(
+    (value) => value.status !== undefined || value.isActive !== undefined,
+    {
+      message: "Provide status or isActive",
+    },
+  );
+
 export const productListQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),
@@ -279,17 +332,16 @@ export const productListQuerySchema = z
     search: z.string().trim().max(200).optional(),
     category: z.string().trim().max(200).optional(),
     brand: z.string().trim().max(200).optional(),
+    categoryId: z.string().uuid("Invalid category id").optional(),
+    brandId: z.string().uuid("Invalid brand id").optional(),
     minPrice: z.coerce.number().finite().min(0).optional(),
     maxPrice: z.coerce.number().finite().min(0).optional(),
     status: z.nativeEnum(ProductStatus).optional(),
-    featured: z
-      .enum(["true", "false"])
-      .transform((value) => value === "true")
-      .optional(),
-    inStock: z
-      .enum(["true", "false"])
-      .transform((value) => value === "true")
-      .optional(),
+    isActive: booleanQuerySchema.optional(),
+    isFeatured: booleanQuerySchema.optional(),
+    featured: booleanQuerySchema.optional(),
+    includeInactive: booleanQuerySchema.default(false),
+    inStock: booleanQuerySchema.optional(),
     sortBy: z
       .enum(["createdAt", "price", "title", "soldCount"])
       .default("createdAt"),
@@ -322,7 +374,7 @@ export const createProductDiscountSchema = z
     discountValue: discountValueSchema,
     startDate: z.coerce.date().optional(),
     endDate: z.coerce.date(),
-    isActive: z.boolean().optional(),
+    isActive: booleanishSchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (
@@ -351,7 +403,7 @@ export const updateProductDiscountSchema = z
     discountValue: discountValueSchema.optional(),
     startDate: z.coerce.date().optional(),
     endDate: z.coerce.date().optional(),
-    isActive: z.boolean().optional(),
+    isActive: booleanishSchema.optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one field must be provided for update",
@@ -417,7 +469,7 @@ const parseAltTexts = (value: unknown): unknown => {
 };
 
 export const productImageUploadSchema = z.object({
-  altText: z.string().trim().max(255).optional(),
+  altText: z.string().trim().max(255).nullish(),
   altTexts: z.preprocess(
     parseAltTexts,
     z.array(z.string().trim().max(255)).max(20).optional(),

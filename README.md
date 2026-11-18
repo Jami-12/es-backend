@@ -127,11 +127,11 @@ The callback URL in Google Cloud Console must exactly match `GOOGLE_CALLBACK_URL
 
 ### bKash
 
-bKash is disabled until `BKASH_ENABLED=true` and all required values are present:
+bKash is disabled until `BKASH_ENABLED=true` and all required values are present. Use sandbox credentials issued for bKash Tokenized Checkout; never point a development environment at the production bKash host.
 
 ```text
-BKASH_ENABLED=true
-BKASH_BASE_URL=
+BKASH_ENABLED=false
+BKASH_BASE_URL=https://tokenized.sandbox.bka.sh/v1.2.0-beta
 BKASH_APP_KEY=
 BKASH_APP_SECRET=
 BKASH_USERNAME=
@@ -139,7 +139,9 @@ BKASH_PASSWORD=
 BKASH_CALLBACK_URL=http://localhost:4000/api/v1/payments/bkash/callback
 ```
 
-Startup validation fails if bKash is enabled with missing credentials.
+Startup validation fails if bKash is enabled with missing credentials, or if a non-production environment uses a host other than the official sandbox hosts (`tokenized.sandbox.bka.sh` or `sandbox.bka.sh`).
+
+The callback URL must be reachable by bKash's servers. `http://localhost:4000` only works when bKash can reach it, so use a public HTTPS tunnel (for example ngrok) during local sandbox testing and set `BKASH_CALLBACK_URL` to the tunnel URL.
 
 ### Nagad
 
@@ -147,7 +149,7 @@ Nagad is disabled until `NAGAD_ENABLED=true` and all required values are present
 
 ```text
 NAGAD_ENABLED=false
-NAGAD_BASE_URL=
+NAGAD_BASE_URL=http://sandbox.mynagad.com:10080/remote-payment-gateway-1.0/api/dfs
 NAGAD_MERCHANT_ID=
 NAGAD_MERCHANT_NUMBER=
 NAGAD_PRIVATE_KEY=
@@ -155,20 +157,31 @@ NAGAD_PUBLIC_KEY=
 NAGAD_CALLBACK_URL=http://localhost:4000/api/v1/payments/nagad/callback
 ```
 
-PEM keys may use `\n` escapes inside a quoted value. Startup validation fails if Nagad is enabled with missing credentials.
+PEM keys may use `\n` escapes inside a quoted value. Missing or mismatched keys are reported without printing key material. Startup validation fails if Nagad is enabled with missing credentials. The classic sandbox endpoint uses plain HTTP on port 10080 and must be reachable from the server; the callback URL must also be reachable by Nagad.
 
 ### Stripe / Card
 
-Stripe is disabled until `STRIPE_ENABLED=true` and both the secret key and webhook secret are present:
+Stripe is disabled until `STRIPE_ENABLED=true`, a secret key, a publishable key and a webhook secret are present:
 
 ```text
 STRIPE_ENABLED=false
 STRIPE_SECRET_KEY=
+STRIPE_PUBLISHABLE_KEY=
 STRIPE_WEBHOOK_SECRET=
 STRIPE_CURRENCY=BDT
 ```
 
+`STRIPE_PUBLISHABLE_KEY` is safe to expose to browsers and is returned by `GET /api/v1/payments/providers` so the storefront can initialise Stripe Elements. The secret key is never returned. `STRIPE_CURRENCY` must match `STORE_CURRENCY`, and `STRIPE_WEBHOOK_SECRET` must be the signing secret for the `/api/v1/payments/card/webhook` endpoint.
+
 Card data is handled by Stripe. It never reaches this server.
+
+### Cash on Delivery
+
+Cash on Delivery requires no gateway credentials. The payment stays `PENDING` until an admin marks the order `DELIVERED`, at which point the payment is recorded as `PAID` and the income ledger entry is created.
+
+### Refund handling
+
+Cancelling or returning a paid order marks its payment `REFUNDED`, stores the refunded amount and writes a `SALES_REFUND` ledger entry. This build does **not** call bKash, Nagad or Stripe refund APIs automatically. Issue the actual gateway refund through the provider dashboard (or add and test a provider refund integration) before treating the `REFUNDED` status as proof that funds were returned. Cash-on-delivery refunds are handled manually.
 
 ### Cloudinary
 

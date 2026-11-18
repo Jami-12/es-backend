@@ -32,6 +32,7 @@ import { resolveCoupon } from "../coupon/coupon.service";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   CheckoutInput,
+  CollectCodPaymentInput,
   OrderListQuery,
   OrderResponse,
   PaginatedOrders,
@@ -146,6 +147,10 @@ const toOrderResponse = (order: OrderRecord): OrderResponse => ({
         transactionId: order.payment.transactionId,
         providerReference: order.payment.providerReference,
         paidAt: order.payment.paidAt?.toISOString() ?? null,
+        collectedById: order.payment.collectedById,
+        collectedByName: order.payment.collectedByName,
+        collectedAt: order.payment.collectedAt?.toISOString() ?? null,
+        collectionNote: order.payment.collectionNote,
         createdAt: order.payment.createdAt.toISOString(),
         updatedAt: order.payment.updatedAt.toISOString(),
       }
@@ -680,26 +685,14 @@ const applyStatusChange = async (
     order.payment.method === PaymentMethod.CASH_ON_DELIVERY &&
     order.payment.status === PaymentStatus.PENDING
   ) {
-    const paidAt = new Date();
-    await tx.payment.update({
-      where: { id: order.payment.id },
-      data: {
-        status: PaymentStatus.PAID,
-        paidAt,
-      },
-    });
-    nextPaymentStatus = PaymentStatus.PAID;
-
-    await recordIncome(
-      {
-        amount: order.payment.amount,
-        date: paidAt,
-        description: `Cash on delivery collected for order ${order.orderNumber}`,
-        referenceType: "PAYMENT",
-        referenceId: order.payment.id,
-        metadata: { orderId: order.id, method: order.payment.method },
-      },
+    // Cash is recorded explicitly by an administrator through the collection
+    // endpoint. Delivering the parcel must not silently mark the payment paid.
+    await createNotification(
       tx,
+      order.userId,
+      "Cash payment due",
+      `Your order ${order.orderNumber} has been delivered. Please keep ${order.payment.amount.toFixed(2)} ready for collection.`,
+      "PAYMENT",
     );
   }
 
@@ -763,6 +756,143 @@ export const updateOrderStatus = async (
     );
 
     return result;
+  });
+
+  return toOrderResponse(updatedOrder);
+};
+
+export const collectCashOnDeliveryPayment = async (
+  actor: AuthenticatedUser,
+  orderId: string,
+  input: CollectCodPaymentInput,
+  ipAddress?: string,
+): Promise<OrderResponse> => {
+  const updatedOrder = await prisma.$transaction(async (tx) => {
+    await lockOrderRow(tx, orderId);
+
+    const order = await tx.order.findUnique({
+      where: { id: orderId },
+      include: orderInclude,
+    });
+
+    if (!order || !order.payment) {
+      throw ApiError.notFound("Order payment not found");
+    }
+
+    if (order.paymentMethod !== PaymentMethod.CASH_ON_DELIVERY) {
+      throw ApiError.badRequest(
+        "Cash collection can only be recorded for cash-on-delivery orders",
+      );
+    }
+
+    if (
+      order.status === OrderStatus.CANCELLED ||
+      order.status === OrderStatus.RETURNED
+    ) {
+      throw ApiError.conflict(
+        `Cannot record cash for a ${order.status.toLowerCase()} order`,
+      );
+    }
+
+    // Idempotent: recording the same collection twice must not duplicate the
+    // ledger income entry.
+    if (order.payment.status === PaymentStatus.PAID) {
+      return order;
+    }
+
+    if (order.payment.status === PaymentStatus.REFUNDED) {
+      throw ApiError.conflict("Refunded payments cannot be collected");
+    }
+
+    const collectedAt = new Date();
+    const note = input.note?.trim() || null;
+    const reference = input.reference?.trim() || null;
+    const transactionId =
+      reference ||
+      order.payment.transactionId ||
+      generateTransactionId(order.paymentMethod);
+    const collectionNote =
+      [reference ? `Reference: ${reference}` : null, note]
+        .filter(Boolean)
+        .join(" · ") || null;
+
+    await tx.payment.update({
+      where: { id: order.payment.id },
+      data: {
+        status: PaymentStatus.PAID,
+        paidAt: collectedAt,
+        transactionId,
+        collectedById: actor.id,
+        collectedByName: actor.name,
+        collectedAt,
+        collectionNote,
+      },
+    });
+
+    await recordIncome(
+      {
+        amount: order.payment.amount,
+        date: collectedAt,
+        description: `Cash on delivery collected for order ${order.orderNumber}`,
+        referenceType: "PAYMENT",
+        referenceId: order.payment.id,
+        metadata: {
+          orderId: order.id,
+          method: order.payment.method,
+          collectedById: actor.id,
+          collectedByName: actor.name,
+          reference,
+        },
+      },
+      tx,
+    );
+
+    await tx.order.update({
+      where: { id: order.id },
+      data: { paymentStatus: PaymentStatus.PAID },
+    });
+
+    await createNotification(
+      tx,
+      order.userId,
+      "Payment received",
+      `Cash payment of ${order.payment.amount.toFixed(2)} for order ${order.orderNumber} has been recorded. Thank you.`,
+      "PAYMENT",
+    );
+
+    await recordAudit(
+      {
+        userId: actor.id,
+        action: "COLLECT_COD_PAYMENT",
+        entity: "Order",
+        entityId: order.id,
+        description: `Recorded cash collection for order ${order.orderNumber}`,
+        oldData: {
+          paymentStatus: order.payment.status,
+          paidAt: order.payment.paidAt,
+        },
+        newData: {
+          paymentStatus: PaymentStatus.PAID,
+          paidAt: collectedAt,
+          collectedById: actor.id,
+          collectedByName: actor.name,
+          collectionNote,
+        },
+        ipAddress,
+      },
+      tx,
+    );
+
+    const refreshed = await tx.order.findUnique({
+      where: { id: order.id },
+      include: orderInclude,
+    });
+
+    if (!refreshed) {
+      throw ApiError.notFound("Order not found");
+    }
+
+    return refreshed;
   });
 
   return toOrderResponse(updatedOrder);
@@ -844,7 +974,6 @@ export const confirmPaymentForOrder = async (
     }
 
     if (
-      order.payment.status === PaymentStatus.CANCELLED ||
       order.payment.status === PaymentStatus.REFUNDED
     ) {
       throw ApiError.conflict(
@@ -956,13 +1085,13 @@ export const markPaymentFailedForOrder = async (
       throw ApiError.conflict("Completed payments cannot be marked as failed");
     }
 
+    // Late provider retries can report a failure after the payment was already
+    // cancelled or refunded. That is an idempotent no-op, not a conflict.
     if (
       order.payment.status === PaymentStatus.CANCELLED ||
       order.payment.status === PaymentStatus.REFUNDED
     ) {
-      throw ApiError.conflict(
-        `Payment cannot be marked as failed because it is ${order.payment.status}`,
-      );
+      return order;
     }
 
     await tx.payment.update({

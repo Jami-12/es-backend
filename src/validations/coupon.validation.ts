@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { booleanishSchema, emptyToUndefined, optionalInputSchema } from "./helpers";
+
 const moneySchema = z.coerce
   .number()
   .finite("Amount must be a valid number")
@@ -23,31 +25,42 @@ const dateSchema = z
   .min(1)
   .refine((value) => !Number.isNaN(Date.parse(value)), "Invalid date");
 
+const optionalPercentSchema = optionalInputSchema(percentSchema);
+const optionalMoneySchema = optionalInputSchema(moneySchema);
+const optionalPositiveMoneySchema = optionalInputSchema(positiveMoneySchema);
+const optionalDateSchema = optionalInputSchema(dateSchema);
+const optionalUsageLimitSchema = optionalInputSchema(
+  z.coerce.number().int().min(1).max(1_000_000),
+);
+
+const hasValue = (value: number | null | undefined): value is number =>
+  value !== undefined && value !== null;
+
 const couponPayloadSchema = z.object({
   code: z
     .string()
     .trim()
     .min(2, "Coupon code must contain at least 2 characters")
     .max(50, "Coupon code must contain at most 50 characters")
-    .regex(/^[A-Za-z0-9_-]+$/, "Coupon code may only contain letters, numbers, dashes and underscores")
+    .regex(
+      /^[A-Za-z0-9_-]+$/,
+      "Coupon code may only contain letters, numbers, dashes and underscores",
+    )
     .transform((value) => value.toUpperCase()),
-  description: z.string().trim().max(2000).optional(),
-  discountPercent: percentSchema.optional(),
-  discountAmount: positiveMoneySchema.optional(),
-  minimumAmount: moneySchema.optional(),
-  maxDiscount: positiveMoneySchema.optional(),
-  usageLimit: z.coerce.number().int().min(1).max(1_000_000).optional(),
-  isActive: z.boolean().optional(),
-  startDate: dateSchema.optional(),
-  endDate: dateSchema.optional(),
+  description: z.string().trim().max(2000).nullish(),
+  discountPercent: optionalPercentSchema,
+  discountAmount: optionalPositiveMoneySchema,
+  minimumAmount: optionalMoneySchema,
+  maxDiscount: optionalPositiveMoneySchema,
+  usageLimit: optionalUsageLimitSchema,
+  isActive: booleanishSchema.optional(),
+  startDate: optionalDateSchema,
+  endDate: optionalDateSchema,
 });
 
-export const createCouponSchema = couponPayloadSchema
-  .superRefine((value, ctx) => {
-    if (
-      (value.discountPercent === undefined) ===
-      (value.discountAmount === undefined)
-    ) {
+export const createCouponSchema = couponPayloadSchema.superRefine(
+  (value, ctx) => {
+    if (hasValue(value.discountPercent) === hasValue(value.discountAmount)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["discountPercent"],
@@ -66,7 +79,8 @@ export const createCouponSchema = couponPayloadSchema
         message: "End date must be after start date",
       });
     }
-  });
+  },
+);
 
 export const updateCouponSchema = z
   .object({
@@ -75,22 +89,29 @@ export const updateCouponSchema = z
       .trim()
       .min(2)
       .max(50)
-      .regex(/^[A-Za-z0-9_-]+$/, "Coupon code may only contain letters, numbers, dashes and underscores")
+      .regex(
+        /^[A-Za-z0-9_-]+$/,
+        "Coupon code may only contain letters, numbers, dashes and underscores",
+      )
       .transform((value) => value.toUpperCase())
       .optional(),
-    description: z.string().trim().max(2000).nullable().optional(),
-    discountPercent: percentSchema.nullable().optional(),
-    discountAmount: positiveMoneySchema.nullable().optional(),
-    minimumAmount: moneySchema.nullable().optional(),
-    maxDiscount: positiveMoneySchema.nullable().optional(),
-    usageLimit: z.coerce.number().int().min(1).max(1_000_000).nullable().optional(),
-    isActive: z.boolean().optional(),
-    startDate: dateSchema.nullable().optional(),
-    endDate: dateSchema.nullable().optional(),
+    description: z.string().trim().max(2000).nullish(),
+    discountPercent: optionalPercentSchema,
+    discountAmount: optionalPositiveMoneySchema,
+    minimumAmount: optionalMoneySchema,
+    maxDiscount: optionalPositiveMoneySchema,
+    usageLimit: optionalUsageLimitSchema,
+    isActive: booleanishSchema.optional(),
+    startDate: optionalDateSchema,
+    endDate: optionalDateSchema,
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one field must be provided for update",
   });
+
+export const updateCouponStatusSchema = z.object({
+  isActive: booleanishSchema,
+});
 
 export const couponListQuerySchema = z.object({
   search: z.string().trim().max(100).optional(),
@@ -100,6 +121,25 @@ export const couponListQuerySchema = z.object({
     .optional(),
 });
 
-export const validateCouponSchema = z.object({
-  code: z.string().trim().min(1, "Coupon code is required").max(50),
-});
+const normalizeCouponValidationInput = (raw: unknown): unknown => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return raw;
+  }
+
+  const value = { ...(raw as Record<string, unknown>) };
+
+  if (value.subtotal === undefined) {
+    value.subtotal =
+      value.orderAmount ?? value.amount ?? value.cartTotal ?? value.total;
+  }
+
+  return value;
+};
+
+export const validateCouponSchema = z.preprocess(
+  normalizeCouponValidationInput,
+  z.object({
+    code: z.string().trim().min(1, "Coupon code is required").max(50),
+    subtotal: z.preprocess(emptyToUndefined, moneySchema.optional()),
+  }),
+);

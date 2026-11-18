@@ -1,17 +1,32 @@
 export interface CreateCouponInput {
   code: string;
-  description?: string;
-  discountPercent?: number;
-  discountAmount?: number;
-  minimumAmount?: number;
-  maxDiscount?: number;
-  usageLimit?: number;
+  description?: string | null;
+  discountPercent?: number | null;
+  discountAmount?: number | null;
+  minimumAmount?: number | null;
+  maxDiscount?: number | null;
+  usageLimit?: number | null;
   isActive?: boolean;
-  startDate?: string;
-  endDate?: string;
+  startDate?: string | null;
+  endDate?: string | null;
 }
 
-export type UpdateCouponInput = Partial<CreateCouponInput>;
+export interface UpdateCouponInput {
+  code?: string;
+  description?: string | null;
+  discountPercent?: number | null;
+  discountAmount?: number | null;
+  minimumAmount?: number | null;
+  maxDiscount?: number | null;
+  usageLimit?: number | null;
+  isActive?: boolean;
+  startDate?: string | null;
+  endDate?: string | null;
+}
+
+export interface UpdateCouponStatusInput {
+  isActive: boolean;
+}
 
 export interface CouponListQuery {
   search?: string;
@@ -37,6 +52,7 @@ export interface CouponResponse {
 
 export interface ValidateCouponInput {
   code: string;
+  subtotal?: number;
 }
 
 export interface CouponValidationResult {

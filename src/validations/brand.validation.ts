@@ -1,7 +1,10 @@
 import { z } from "zod";
 
-const optionalText = (max: number) =>
-  z.string().trim().max(max, `Value must contain at most ${max} characters`);
+import {
+  booleanishSchema,
+  nullableTextSchema,
+  optionalTextSchema,
+} from "./helpers";
 
 export const createBrandSchema = z.object({
   name: z
@@ -9,9 +12,10 @@ export const createBrandSchema = z.object({
     .trim()
     .min(2, "Brand name must contain at least 2 characters")
     .max(120, "Brand name must contain at most 120 characters"),
-  slug: optionalText(160).optional(),
-  logo: optionalText(2000).optional(),
-  description: optionalText(5000).optional(),
+  slug: optionalTextSchema(2, 160, "Slug"),
+  logo: nullableTextSchema(2000, "Logo"),
+  description: nullableTextSchema(5000, "Description"),
+  isActive: booleanishSchema.optional(),
 });
 
 export const updateBrandSchema = z
@@ -22,14 +26,23 @@ export const updateBrandSchema = z
       .min(2, "Brand name must contain at least 2 characters")
       .max(120, "Brand name must contain at most 120 characters")
       .optional(),
-    slug: optionalText(160).optional(),
-    logo: optionalText(2000).nullable().optional(),
-    description: optionalText(5000).nullable().optional(),
+    slug: optionalTextSchema(2, 160, "Slug"),
+    logo: nullableTextSchema(2000, "Logo"),
+    description: nullableTextSchema(5000, "Description"),
+    isActive: booleanishSchema.optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one field must be provided for update",
   });
 
+export const updateBrandStatusSchema = z.object({
+  isActive: booleanishSchema,
+});
+
 export const brandListQuerySchema = z.object({
   search: z.string().trim().max(200).optional(),
+  isActive: z
+    .enum(["true", "false"])
+    .transform((value) => value === "true")
+    .optional(),
 });

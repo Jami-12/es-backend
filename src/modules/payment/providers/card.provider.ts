@@ -11,6 +11,12 @@ import type {
   PaymentVerificationContext,
   ProviderVerificationResult,
 } from "../payment-provider.types";
+import {
+  gatewayErrorMessage,
+  gatewayFetch,
+  readGatewayResponse,
+  unusableGatewayMessage,
+} from "./gateway-response";
 
 type JsonObject = Record<string, unknown>;
 
@@ -102,7 +108,13 @@ export const verifyStripeWebhookSignature = (
     throw ApiError.unauthorized("Invalid Stripe webhook signature");
   }
 
-  const parsed = JSON.parse(rawPayload.toString("utf8")) as StripeWebhookEvent;
+  let parsed: StripeWebhookEvent;
+
+  try {
+    parsed = JSON.parse(rawPayload.toString("utf8")) as StripeWebhookEvent;
+  } catch {
+    throw ApiError.badRequest("Invalid Stripe webhook payload");
+  }
 
   if (!parsed || typeof parsed.type !== "string" || !parsed.data?.object) {
     throw ApiError.badRequest("Invalid Stripe webhook payload");
@@ -130,7 +142,9 @@ const createPaymentIntent = async (
   body.set("metadata[orderId]", orderId);
   body.set("metadata[orderNumber]", orderNumber);
 
-  const response = await fetch(`${STRIPE_API_BASE}/payment_intents`, {
+  const response = await gatewayFetch(`${STRIPE_API_BASE}/payment_intents`, {
+    provider: "Stripe",
+    operation: "creating the payment",
     method: "POST",
     headers: {
       Authorization: `Bearer ${secretKey}`,
@@ -139,13 +153,28 @@ const createPaymentIntent = async (
     body: body.toString(),
   });
 
-  const data = asObject(await response.json());
+  const gateway = await readGatewayResponse(response, {
+    provider: "Stripe",
+    operation: "payment intent create",
+  });
+  const data = gateway.data;
 
-  if (!response.ok) {
+  if (!gateway.httpOk) {
     const error = asObject(data.error);
+    const providerMessage = gatewayErrorMessage(error, "message");
+
     throw new ApiError(
       502,
-      getString(error.message, "Card payment could not be initiated"),
+      gateway.isUsableJson && providerMessage
+        ? providerMessage
+        : unusableGatewayMessage(gateway, "creating the payment"),
+    );
+  }
+
+  if (!gateway.isUsableJson) {
+    throw new ApiError(
+      502,
+      unusableGatewayMessage(gateway, "creating the payment"),
     );
   }
 
@@ -159,7 +188,9 @@ export const refundStripePayment = async (
   const body = new URLSearchParams();
   body.set("payment_intent", providerPaymentId);
 
-  const response = await fetch(`${STRIPE_API_BASE}/refunds`, {
+  const response = await gatewayFetch(`${STRIPE_API_BASE}/refunds`, {
+    provider: "Stripe",
+    operation: "processing the refund",
     method: "POST",
     headers: {
       Authorization: `Bearer ${secretKey}`,
@@ -168,13 +199,28 @@ export const refundStripePayment = async (
     body: body.toString(),
   });
 
-  const data = asObject(await response.json());
+  const gateway = await readGatewayResponse(response, {
+    provider: "Stripe",
+    operation: "refund create",
+  });
+  const data = gateway.data;
 
-  if (!response.ok) {
+  if (!gateway.httpOk) {
     const error = asObject(data.error);
+    const providerMessage = gatewayErrorMessage(error, "message");
+
     throw new ApiError(
       502,
-      getString(error.message, "Card refund could not be processed"),
+      gateway.isUsableJson && providerMessage
+        ? providerMessage
+        : unusableGatewayMessage(gateway, "processing the refund"),
+    );
+  }
+
+  if (!gateway.isUsableJson) {
+    throw new ApiError(
+      502,
+      unusableGatewayMessage(gateway, "processing the refund"),
     );
   }
 
@@ -227,17 +273,26 @@ export const cardProvider: PaymentProvider = {
     }
 
     const secretKey = requireStripe();
-    const response = await fetch(
+    const response = await gatewayFetch(
       `${STRIPE_API_BASE}/payment_intents/${encodeURIComponent(intentId)}`,
       {
+        provider: "Stripe",
+        operation: "verifying the payment",
         headers: { Authorization: `Bearer ${secretKey}` },
       },
     );
 
-    const data = asObject(await response.json());
+    const gateway = await readGatewayResponse(response, {
+      provider: "Stripe",
+      operation: "payment intent verify",
+    });
+    const data = gateway.data;
 
-    if (!response.ok) {
-      throw new ApiError(502, "Card payment could not be verified");
+    if (!gateway.httpOk || !gateway.isUsableJson) {
+      throw new ApiError(
+        502,
+        unusableGatewayMessage(gateway, "verifying the payment"),
+      );
     }
 
     const returnedIntentId = getString(data.id);

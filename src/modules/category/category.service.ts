@@ -8,6 +8,7 @@ import type {
   CategoryResponse,
   CreateCategoryInput,
   UpdateCategoryInput,
+  UpdateCategoryStatusInput,
 } from "../../types/category.types";
 
 const categorySelect = {
@@ -16,6 +17,7 @@ const categorySelect = {
   slug: true,
   description: true,
   image: true,
+  isActive: true,
   createdAt: true,
   updatedAt: true,
   _count: { select: { products: true } },
@@ -31,6 +33,7 @@ const toCategoryResponse = (category: CategoryRecord): CategoryResponse => ({
   slug: category.slug,
   description: category.description,
   image: category.image,
+  isActive: category.isActive,
   productCount: category._count.products,
   createdAt: category.createdAt.toISOString(),
   updatedAt: category.updatedAt.toISOString(),
@@ -46,6 +49,10 @@ export const listCategories = async (
       { name: { contains: query.search, mode: "insensitive" } },
       { description: { contains: query.search, mode: "insensitive" } },
     ];
+  }
+
+  if (typeof query.isActive === "boolean") {
+    where.isActive = query.isActive;
   }
 
   const categories = await prisma.category.findMany({
@@ -100,6 +107,7 @@ export const createCategory = async (
       slug,
       description: input.description?.trim() || null,
       image: input.image?.trim() || null,
+      isActive: input.isActive ?? true,
     },
     select: categorySelect,
   });
@@ -164,6 +172,10 @@ export const updateCategory = async (
     data.image = input.image?.trim() || null;
   }
 
+  if (input.isActive !== undefined) {
+    data.isActive = input.isActive;
+  }
+
   if (data.name || data.slug) {
     const duplicate = await prisma.category.findFirst({
       where: {
@@ -195,6 +207,41 @@ export const updateCategory = async (
     description: `Updated category ${category.name}`,
     oldData: existing,
     newData: category,
+    ipAddress,
+  });
+
+  return toCategoryResponse(category);
+};
+
+export const updateCategoryStatus = async (
+  actorId: string,
+  categoryId: string,
+  input: UpdateCategoryStatusInput,
+  ipAddress?: string,
+): Promise<CategoryResponse> => {
+  const existing = await prisma.category.findUnique({
+    where: { id: categoryId },
+    select: categorySelect,
+  });
+
+  if (!existing) {
+    throw ApiError.notFound("Category not found");
+  }
+
+  const category = await prisma.category.update({
+    where: { id: categoryId },
+    data: { isActive: input.isActive },
+    select: categorySelect,
+  });
+
+  await recordAudit({
+    userId: actorId,
+    action: input.isActive ? "ENABLE_CATEGORY" : "DISABLE_CATEGORY",
+    entity: "Category",
+    entityId: category.id,
+    description: `${input.isActive ? "Enabled" : "Disabled"} category ${category.name}`,
+    oldData: { isActive: existing.isActive },
+    newData: { isActive: category.isActive },
     ipAddress,
   });
 

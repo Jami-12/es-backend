@@ -22,6 +22,12 @@ router.post(
 );
 
 router.get(
+  "/",
+  validate({ query: orderListQuerySchema }),
+  orderController.listOrders,
+);
+
+router.get(
   "/my-orders",
   authorize([Role.CUSTOMER]),
   validate({ query: orderListQuerySchema }),

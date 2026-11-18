@@ -2,6 +2,7 @@ import type {
   BrandListQuery,
   CreateBrandInput,
   UpdateBrandInput,
+  UpdateBrandStatusInput,
 } from "../../types/brand.types";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { sendSuccess } from "../../utils/ApiResponse";
@@ -55,6 +56,21 @@ export const updateBrand = asyncHandler(async (req, res) => {
   sendSuccess(res, {
     data: { brand },
     message: "Brand updated successfully",
+  });
+});
+
+export const updateBrandStatus = asyncHandler(async (req, res) => {
+  const actor = getAuthUser(req);
+  const brand = await brandService.updateBrandStatus(
+    actor.id,
+    req.params.id,
+    req.body as UpdateBrandStatusInput,
+    req.ip,
+  );
+
+  sendSuccess(res, {
+    data: { brand },
+    message: "Brand status updated successfully",
   });
 });
 

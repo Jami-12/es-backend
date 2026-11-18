@@ -1,7 +1,9 @@
 import { PaymentMethod } from "@prisma/client";
+import { isNagadSimulationEnabled } from "../../../config/payment.config";
 import { bkashProvider } from "./bkash.provider";
 import { cardProvider } from "./card.provider";
 import { nagadProvider } from "./nagad.provider";
+import { simulationNagadProvider } from "./nagad-simulation.provider";
 import type { PaymentProvider } from "../payment-provider.types";
 
 const providers: Partial<Record<PaymentMethod, PaymentProvider>> = {
@@ -12,6 +14,14 @@ const providers: Partial<Record<PaymentMethod, PaymentProvider>> = {
 
 export const getPaymentProvider = (
   method: PaymentMethod,
-): PaymentProvider | undefined => providers[method];
+): PaymentProvider | undefined => {
+  // The dev-only simulation takes precedence for Nagad so the whole flow can be
+  // exercised without the live sandbox. It can never activate in production.
+  if (method === PaymentMethod.NAGAD && isNagadSimulationEnabled()) {
+    return simulationNagadProvider;
+  }
 
-export { bkashProvider, nagadProvider, cardProvider };
+  return providers[method];
+};
+
+export { bkashProvider, nagadProvider, simulationNagadProvider, cardProvider };

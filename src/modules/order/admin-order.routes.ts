@@ -5,6 +5,7 @@ import { authorize } from "../../middlewares/authorize.middleware";
 import { validate } from "../../middlewares/validate.middleware";
 import { idParamSchema } from "../../validations/common.validation";
 import {
+  collectCodPaymentSchema,
   orderListQuerySchema,
   updateOrderStatusSchema,
 } from "../../validations/order.validation";
@@ -30,6 +31,12 @@ router.patch(
   "/:id/status",
   validate({ params: idParamSchema, body: updateOrderStatusSchema }),
   orderController.adminUpdateOrderStatus,
+);
+
+router.patch(
+  "/:id/collect-payment",
+  validate({ params: idParamSchema, body: collectCodPaymentSchema }),
+  orderController.adminCollectCodPayment,
 );
 
 export const adminOrderRoutes = router;

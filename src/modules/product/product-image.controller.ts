@@ -20,7 +20,7 @@ const collectUploadedFiles = (
     return files;
   }
 
-  return [...(files.images ?? []), ...(files.image ?? [])];
+  return [...(files.images ?? []), ...(files.image ?? []), ...(files.file ?? [])];
 };
 
 export const listProductImages = asyncHandler(async (req, res) => {

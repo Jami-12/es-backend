@@ -11,6 +11,7 @@ import {
   createProductSchema,
   productListQuerySchema,
   updateProductSchema,
+  updateProductStatusSchema,
 } from "../../validations/product.validation";
 import * as productController from "./product.controller";
 
@@ -42,6 +43,12 @@ router.post(
   "/",
   validate({ body: createProductSchema }),
   productController.createProduct,
+);
+
+router.patch(
+  "/:id/status",
+  validate({ params: idParamSchema, body: updateProductStatusSchema }),
+  productController.updateProductStatus,
 );
 
 router.patch(

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { booleanishSchema } from "./helpers";
+
 const fullNameSchema = z
   .string()
   .trim()
@@ -24,7 +26,8 @@ const addressLineSchema = z
   .min(5, "Address line must contain at least 5 characters")
   .max(1000);
 
-const optionalText = (max: number) => z.string().trim().max(max).optional();
+const optionalText = (max: number) =>
+  z.string().trim().max(max).nullish();
 
 export const createAddressSchema = z.object({
   fullName: fullNameSchema,
@@ -34,19 +37,19 @@ export const createAddressSchema = z.object({
   area: optionalText(120),
   addressLine: addressLineSchema,
   postalCode: optionalText(20),
-  isDefault: z.boolean().optional(),
+  isDefault: booleanishSchema.optional(),
 });
 
 export const updateAddressSchema = z
   .object({
     fullName: fullNameSchema.optional(),
     phone: phoneSchema.optional(),
-    division: optionalText(120).nullable(),
+    division: optionalText(120),
     district: districtSchema.optional(),
-    area: optionalText(120).nullable(),
+    area: optionalText(120),
     addressLine: addressLineSchema.optional(),
-    postalCode: optionalText(20).nullable(),
-    isDefault: z.boolean().optional(),
+    postalCode: optionalText(20),
+    isDefault: booleanishSchema.optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one field must be provided for update",

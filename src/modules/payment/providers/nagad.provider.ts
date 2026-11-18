@@ -18,19 +18,17 @@ import type {
   PaymentVerificationContext,
   ProviderVerificationResult,
 } from "../payment-provider.types";
+import {
+  gatewayErrorMessage,
+  gatewayFetch,
+  readGatewayResponse,
+  unusableGatewayMessage,
+} from "./gateway-response";
 
 type JsonObject = Record<string, unknown>;
 
 const getString = (value: unknown, fallback = ""): string =>
   typeof value === "string" ? value : fallback;
-
-const asObject = (value: unknown): JsonObject => {
-  if (typeof value === "object" && value !== null) {
-    return value as JsonObject;
-  }
-
-  return {};
-};
 
 const toJson = (value: unknown): Prisma.InputJsonValue =>
   JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -369,9 +367,11 @@ const initializeSession = async (
   const sensitiveData = encryptWithPublicKey(sensitivePayload);
   const signature = signWithPrivateKey(sensitiveData);
 
-  const response = await fetch(
+  const response = await gatewayFetch(
     `${requireBaseUrl()}/check-out/initialize/${encodeURIComponent(nagadConfig.merchantId)}/${encodeURIComponent(orderId)}`,
     {
+      provider: "Nagad",
+      operation: "initializing the payment",
       method: "POST",
       headers: nagadHeaders(),
       body: JSON.stringify({
@@ -383,17 +383,33 @@ const initializeSession = async (
     },
   );
 
-  const data = asObject(await response.json());
+  const gateway = await readGatewayResponse(response, {
+    provider: "Nagad",
+    operation: "checkout initialize",
+  });
+  const data = gateway.data;
   const responseSensitiveData = getString(data.sensitiveData);
   const responseSignature = getString(data.signature);
 
-  if (!response.ok || !responseSensitiveData || !responseSignature) {
+  if (
+    !gateway.httpOk ||
+    !gateway.isUsableJson ||
+    !responseSensitiveData ||
+    !responseSignature
+  ) {
+    const providerMessage = gatewayErrorMessage(
+      data,
+      "message",
+      "errorMessage",
+    );
+
     throw new ApiError(
       502,
-      getString(
-        data.message,
-        "Nagad payment session could not be initialized.",
-      ),
+      gateway.isUsableJson && providerMessage
+        ? providerMessage
+        : gateway.httpOk
+          ? "Nagad returned an unreadable response while initializing the payment. Please try again."
+          : unusableGatewayMessage(gateway, "initializing the payment"),
     );
   }
 
@@ -445,9 +461,11 @@ const completeSession = async (
   const sensitiveData = encryptWithPublicKey(sensitivePayload);
   const signature = signWithPrivateKey(sensitiveData);
 
-  const response = await fetch(
+  const response = await gatewayFetch(
     `${requireBaseUrl()}/check-out/complete/${encodeURIComponent(session.paymentReferenceId)}`,
     {
+      provider: "Nagad",
+      operation: "completing the payment",
       method: "POST",
       headers: nagadHeaders(),
       body: JSON.stringify({
@@ -459,13 +477,27 @@ const completeSession = async (
     },
   );
 
-  const data = asObject(await response.json());
+  const gateway = await readGatewayResponse(response, {
+    provider: "Nagad",
+    operation: "checkout complete",
+  });
+  const data = gateway.data;
   const callbackUrl = getString(data.callBackUrl);
 
-  if (!response.ok || !callbackUrl) {
+  if (!gateway.httpOk || !gateway.isUsableJson || !callbackUrl) {
+    const providerMessage = gatewayErrorMessage(
+      data,
+      "message",
+      "errorMessage",
+    );
+
     throw new ApiError(
       502,
-      getString(data.message, "Nagad payment could not be completed."),
+      gateway.isUsableJson && providerMessage
+        ? providerMessage
+        : gateway.httpOk
+          ? "Nagad returned an unreadable response while completing the payment. Please try again."
+          : unusableGatewayMessage(gateway, "completing the payment"),
     );
   }
 
@@ -475,16 +507,35 @@ const completeSession = async (
 const verifyNagadPayment = async (
   paymentReferenceId: string,
 ): Promise<JsonObject> => {
-  const response = await fetch(
+  const response = await gatewayFetch(
     `${requireBaseUrl()}/verify/payment/${encodeURIComponent(paymentReferenceId)}`,
     {
+      provider: "Nagad",
+      operation: "verifying the payment",
       method: "GET",
       headers: nagadHeaders(),
     },
   );
 
-  return asObject(await response.json());
+  const gateway = await readGatewayResponse(response, {
+    provider: "Nagad",
+    operation: "payment verify",
+  });
+
+  if (!gateway.httpOk || !gateway.isUsableJson) {
+    throw new ApiError(
+      502,
+      unusableGatewayMessage(gateway, "verifying the payment"),
+    );
+  }
+
+  return gateway.data;
 };
+
+const isNagadSuccess = (data: JsonObject): boolean =>
+  ["success", "successful", "completed"].includes(
+    getString(data.status).toLowerCase(),
+  );
 
 const buildVerification = (data: JsonObject): ProviderVerificationResult => {
   const status = getString(data.status).toLowerCase();
@@ -492,7 +543,22 @@ const buildVerification = (data: JsonObject): ProviderVerificationResult => {
   const paymentReferenceId = getString(data.paymentReferenceId);
   const issuerPaymentRefNo = getString(data.issuerPaymentRefNo);
 
-  if (status === "success" || statusCode === "000") {
+  // Cancellation must be checked before anything else. Nagad can return
+  // statusCode "000" together with an aborted status, and treating the code
+  // alone as success would mark an aborted payment as PAID.
+  if (["aborted", "cancelled", "canceled"].includes(status)) {
+    return {
+      status: "CANCELLED",
+      providerPaymentId: paymentReferenceId || undefined,
+      providerResponse: toJson(data),
+      rawStatus: getString(data.status) || statusCode,
+    };
+  }
+
+  if (
+    isNagadSuccess(data) &&
+    (statusCode === "" || statusCode === "000")
+  ) {
     return {
       status: "PAID",
       transactionId: issuerPaymentRefNo || paymentReferenceId,
@@ -503,20 +569,15 @@ const buildVerification = (data: JsonObject): ProviderVerificationResult => {
     };
   }
 
-  if (status === "aborted" || status === "cancelled" || status === "canceled") {
-    return {
-      status: "CANCELLED",
-      providerPaymentId: paymentReferenceId || undefined,
-      providerResponse: toJson(data),
-      rawStatus: getString(data.status),
-    };
-  }
-
-  if (!status && !statusCode) {
+  if (
+    !status ||
+    ["pending", "initiated", "processing", "in_progress"].includes(status)
+  ) {
     return {
       status: "PENDING",
       providerPaymentId: paymentReferenceId || undefined,
       providerResponse: toJson(data),
+      rawStatus: getString(data.status) || statusCode,
     };
   }
 
@@ -532,6 +593,7 @@ const assertNagadPaymentMatches = (
   data: JsonObject,
   payment: PaymentVerificationContext,
   callbackPaymentRef: string,
+  callbackOrderId: string | undefined,
 ): void => {
   const returnedRef = getString(data.paymentReferenceId);
 
@@ -541,33 +603,52 @@ const assertNagadPaymentMatches = (
     );
   }
 
-  const returnedOrderId =
-    getString(data.orderId) || getString(data.merchantOrderId);
-
-  if (!returnedOrderId || returnedOrderId !== payment.orderId) {
+  if (callbackOrderId && callbackOrderId !== payment.orderId) {
     throw ApiError.badRequest("Nagad payment does not belong to this order");
   }
 
-  const amountText = getString(data.amount);
-  const amount = Number(amountText);
-  const expectedAmount = Number(payment.amount);
+  // The verify endpoint does not always echo the merchant order id. Only
+  // reject a mismatch when the gateway actually returns one.
+  const returnedOrderId =
+    getString(data.orderId) || getString(data.merchantOrderId);
 
-  if (
-    !amountText ||
-    !Number.isFinite(amount) ||
-    !Number.isFinite(expectedAmount) ||
-    Math.abs(amount - expectedAmount) > 0.01
-  ) {
+  if (returnedOrderId && returnedOrderId !== payment.orderId) {
+    throw ApiError.badRequest("Nagad payment does not belong to this order");
+  }
+
+  const success = isNagadSuccess(data);
+  const amountText = getString(data.amount);
+
+  if (amountText) {
+    const amount = Number(amountText);
+    const expectedAmount = Number(payment.amount);
+
+    if (
+      !Number.isFinite(amount) ||
+      !Number.isFinite(expectedAmount) ||
+      Math.abs(amount - expectedAmount) > 0.01
+    ) {
+      throw ApiError.badRequest(
+        "Nagad payment amount does not match this order",
+      );
+    }
+  } else if (success) {
     throw ApiError.badRequest(
-      "Nagad payment amount does not match this order",
+      "Nagad completed payment is missing the paid amount",
     );
   }
 
   const currencyCode = getString(data.currencyCode);
 
-  if (currencyCode && currencyCode !== "050") {
+  if (currencyCode) {
+    if (currencyCode !== "050") {
+      throw ApiError.badRequest(
+        "Nagad payment currency does not match this store",
+      );
+    }
+  } else if (success) {
     throw ApiError.badRequest(
-      "Nagad payment currency does not match this store",
+      "Nagad completed payment is missing the currency code",
     );
   }
 };
@@ -595,6 +676,7 @@ export const nagadProvider: PaymentProvider = {
       providerResponse: toJson({
         paymentReferenceId: session.paymentReferenceId,
         status: "INITIALIZED",
+        callBackUrl: redirectUrl,
       }),
     };
   },
@@ -623,11 +705,25 @@ export const nagadProvider: PaymentProvider = {
       );
     }
 
+    const callbackOrderId =
+      callbackData.order_id?.trim() ||
+      callbackData.orderId?.trim() ||
+      callbackData.merchantOrderId?.trim();
+
+    if (callbackOrderId && callbackOrderId !== payment.orderId) {
+      throw ApiError.badRequest("Nagad payment does not belong to this order");
+    }
+
     // The callback is an unauthenticated redirect, so it must not decide the
     // outcome. Always resolve the authoritative status through Nagad's verify
     // endpoint before touching the order or payment record.
     const verified = await verifyNagadPayment(callbackPaymentRef);
-    assertNagadPaymentMatches(verified, payment, callbackPaymentRef);
+    assertNagadPaymentMatches(
+      verified,
+      payment,
+      callbackPaymentRef,
+      callbackOrderId,
+    );
 
     return buildVerification({
       ...verified,

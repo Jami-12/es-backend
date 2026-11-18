@@ -8,6 +8,7 @@ import type {
   BrandResponse,
   CreateBrandInput,
   UpdateBrandInput,
+  UpdateBrandStatusInput,
 } from "../../types/brand.types";
 
 const brandSelect = {
@@ -16,6 +17,7 @@ const brandSelect = {
   slug: true,
   logo: true,
   description: true,
+  isActive: true,
   createdAt: true,
   updatedAt: true,
   _count: { select: { products: true } },
@@ -29,6 +31,7 @@ const toBrandResponse = (brand: BrandRecord): BrandResponse => ({
   slug: brand.slug,
   logo: brand.logo,
   description: brand.description,
+  isActive: brand.isActive,
   productCount: brand._count.products,
   createdAt: brand.createdAt.toISOString(),
   updatedAt: brand.updatedAt.toISOString(),
@@ -44,6 +47,10 @@ export const listBrands = async (
       { name: { contains: query.search, mode: "insensitive" } },
       { description: { contains: query.search, mode: "insensitive" } },
     ];
+  }
+
+  if (typeof query.isActive === "boolean") {
+    where.isActive = query.isActive;
   }
 
   const brands = await prisma.brand.findMany({
@@ -94,6 +101,7 @@ export const createBrand = async (
       slug,
       logo: input.logo?.trim() || null,
       description: input.description?.trim() || null,
+      isActive: input.isActive ?? true,
     },
     select: brandSelect,
   });
@@ -158,6 +166,10 @@ export const updateBrand = async (
     data.description = input.description?.trim() || null;
   }
 
+  if (input.isActive !== undefined) {
+    data.isActive = input.isActive;
+  }
+
   if (data.name || data.slug) {
     const duplicate = await prisma.brand.findFirst({
       where: {
@@ -189,6 +201,41 @@ export const updateBrand = async (
     description: `Updated brand ${brand.name}`,
     oldData: existing,
     newData: brand,
+    ipAddress,
+  });
+
+  return toBrandResponse(brand);
+};
+
+export const updateBrandStatus = async (
+  actorId: string,
+  brandId: string,
+  input: UpdateBrandStatusInput,
+  ipAddress?: string,
+): Promise<BrandResponse> => {
+  const existing = await prisma.brand.findUnique({
+    where: { id: brandId },
+    select: brandSelect,
+  });
+
+  if (!existing) {
+    throw ApiError.notFound("Brand not found");
+  }
+
+  const brand = await prisma.brand.update({
+    where: { id: brandId },
+    data: { isActive: input.isActive },
+    select: brandSelect,
+  });
+
+  await recordAudit({
+    userId: actorId,
+    action: input.isActive ? "ENABLE_BRAND" : "DISABLE_BRAND",
+    entity: "Brand",
+    entityId: brand.id,
+    description: `${input.isActive ? "Enabled" : "Disabled"} brand ${brand.name}`,
+    oldData: { isActive: existing.isActive },
+    newData: { isActive: brand.isActive },
     ipAddress,
   });
 

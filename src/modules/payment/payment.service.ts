@@ -11,10 +11,15 @@ import type {
   PaymentResponse,
   PaymentWebhookInput,
 } from "../../types/payment.types";
+import type { OrderResponse } from "../../types/order.types";
 import * as orderService from "../order/order.service";
 import { getPaymentProvider } from "./providers";
 import { verifyStripeWebhookSignature } from "./providers/card.provider";
-import type { ProviderVerificationResult } from "./payment-provider.types";
+import type {
+  PaymentInitiationResult,
+  PaymentProvider,
+  ProviderVerificationResult,
+} from "./payment-provider.types";
 
 const paymentSelect = {
   id: true,
@@ -25,6 +30,7 @@ const paymentSelect = {
   transactionId: true,
   providerPaymentId: true,
   providerReference: true,
+  providerResponse: true,
   paidAt: true,
   createdAt: true,
   updatedAt: true,
@@ -33,6 +39,19 @@ const paymentSelect = {
 type PaymentRecord = Prisma.PaymentGetPayload<{
   select: typeof paymentSelect;
 }>;
+
+/**
+ * How long a checkout initiation may hold a payment in PROCESSING without a
+ * provider reference before another request is allowed to reclaim it. This
+ * prevents a crashed request from permanently blocking the order.
+ */
+const INITIATION_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
+
+interface PaymentClaimSnapshot {
+  status: PaymentStatus;
+  providerPaymentId: string | null;
+  providerReference: string | null;
+}
 
 const toPaymentResponse = (payment: PaymentRecord): PaymentResponse => ({
   id: payment.id,
@@ -76,6 +95,339 @@ const loadPaymentRecord = async (
   }
 
   return payment;
+};
+
+const extractStoredRedirectUrl = (
+  method: PaymentMethod,
+  providerResponse: unknown,
+): string | undefined => {
+  if (
+    !providerResponse ||
+    typeof providerResponse !== "object" ||
+    Array.isArray(providerResponse)
+  ) {
+    return undefined;
+  }
+
+  const data = providerResponse as Record<string, unknown>;
+  const keys =
+    method === PaymentMethod.BKASH
+      ? ["bkashURL"]
+      : method === PaymentMethod.NAGAD
+        ? ["callBackUrl", "callbackUrl"]
+        : [];
+
+  for (const key of keys) {
+    const value = data[key];
+
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return undefined;
+};
+
+const asJsonObject = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+};
+
+/**
+ * Keeps provider metadata monotonic. A status query often returns only the
+ * transaction fields, while the create response held the redirect URL. Merging
+ * preserves both so a refreshed checkout can still return the original
+ * bKash/Nagad redirect URL instead of losing it on every poll.
+ */
+const mergeProviderResponses = (
+  existing: unknown,
+  incoming: Prisma.InputJsonValue | undefined,
+): Prisma.InputJsonValue | undefined => {
+  const existingObject = asJsonObject(existing);
+  const incomingObject = asJsonObject(incoming);
+
+  if (!existingObject) {
+    return incoming;
+  }
+
+  if (!incomingObject) {
+    return existing as Prisma.InputJsonValue;
+  }
+
+  return {
+    ...existingObject,
+    ...incomingObject,
+  } as Prisma.InputJsonValue;
+};
+
+const callbackDataForStoredPayment = (
+  method: PaymentMethod,
+  providerPaymentId: string,
+): Record<string, string> => {
+  switch (method) {
+    case PaymentMethod.BKASH:
+      return { paymentID: providerPaymentId };
+    case PaymentMethod.NAGAD:
+      return { payment_ref_id: providerPaymentId };
+    case PaymentMethod.CARD:
+      return { paymentIntentId: providerPaymentId };
+    default:
+      return {};
+  }
+};
+
+/**
+ * Re-checks an in-flight provider session before a second checkout is created.
+ * Returns a resumable response when the customer can continue, or null when
+ * the previous attempt is terminal and a new session may be created.
+ */
+const resumeProcessingPayment = async (
+  order: OrderResponse,
+  provider: PaymentProvider,
+  existingPayment: PaymentRecord,
+): Promise<InitiatePaymentResult | null> => {
+  if (!existingPayment.providerPaymentId) {
+    return null;
+  }
+
+  const verification = await provider.verify(
+    {
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      amount: order.totalAmount.toFixed(2),
+      providerPaymentId: existingPayment.providerPaymentId,
+    },
+    callbackDataForStoredPayment(
+      order.paymentMethod,
+      existingPayment.providerPaymentId,
+    ),
+  );
+
+  if (verification.status === "PAID") {
+    await orderService.confirmPaymentForOrder(
+      order.id,
+      verification.transactionId,
+      verification.providerReference,
+      verification.providerPaymentId,
+      mergeProviderResponses(
+        existingPayment.providerResponse,
+        verification.providerResponse,
+      ),
+    );
+
+    return {
+      payment: toPaymentResponse(await loadPaymentRecord(existingPayment.id)),
+      method: order.paymentMethod,
+      paymentStatus: PaymentStatus.PAID,
+      message: "This payment has already been confirmed.",
+      providerPaymentId: verification.providerPaymentId ?? null,
+    };
+  }
+
+  if (verification.status === "FAILED") {
+    await orderService.markPaymentFailedForOrder(
+      order.id,
+      verification.rawStatus ?? "Provider reported a failed payment",
+    );
+    return null;
+  }
+
+  if (verification.status === "CANCELLED") {
+    await markPaymentCancelled(
+      order.id,
+      existingPayment.id,
+      verification,
+    );
+    return null;
+  }
+
+  const processed = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${order.id}::uuid FOR UPDATE`;
+
+    const current = await tx.payment.findUnique({
+      where: { id: existingPayment.id },
+      select: { status: true },
+    });
+
+    if (
+      !current ||
+      (current.status !== PaymentStatus.PENDING &&
+        current.status !== PaymentStatus.PROCESSING)
+    ) {
+      return false;
+    }
+
+    await tx.payment.update({
+      where: { id: existingPayment.id },
+      data: {
+        status: PaymentStatus.PROCESSING,
+        providerPaymentId:
+          verification.providerPaymentId ??
+          existingPayment.providerPaymentId,
+        providerResponse: mergeProviderResponses(
+          existingPayment.providerResponse,
+          verification.providerResponse,
+        ),
+      },
+    });
+
+    await tx.order.update({
+      where: { id: order.id },
+      data: { paymentStatus: PaymentStatus.PROCESSING },
+    });
+
+    return true;
+  });
+
+  if (!processed) {
+    return null;
+  }
+
+  const payment = await loadPaymentRecord(existingPayment.id);
+  const redirectUrl =
+    extractStoredRedirectUrl(order.paymentMethod, payment.providerResponse) ??
+    extractStoredRedirectUrl(
+      order.paymentMethod,
+      verification.providerResponse,
+    );
+
+  return {
+    payment: toPaymentResponse(payment),
+    method: order.paymentMethod,
+    paymentStatus: PaymentStatus.PROCESSING,
+    message: redirectUrl
+      ? "Resume the existing payment session"
+      : verification.clientSecret
+        ? "Resume the existing card payment session"
+        : "A payment is already processing for this order. Please wait for the provider to confirm it.",
+    redirectUrl,
+    clientSecret: verification.clientSecret,
+    providerPaymentId: payment.providerPaymentId,
+  };
+};
+
+const claimPaymentForInitiation = async (
+  orderId: string,
+  paymentId: string,
+): Promise<{
+  claimed: boolean;
+  payment: PaymentRecord;
+  snapshot?: PaymentClaimSnapshot;
+}> =>
+  prisma.$transaction(async (tx) => {
+    // Serialize two checkout requests for the same order. Holding the order
+    // lock for this short transaction prevents both requests from creating a
+    // provider session; the actual gateway call happens after the lock is
+    // released.
+    await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
+
+    const payment = await tx.payment.findUnique({
+      where: { id: paymentId },
+      select: paymentSelect,
+    });
+
+    if (!payment) {
+      throw ApiError.notFound("Payment record not found for this order");
+    }
+
+    if (payment.status === PaymentStatus.PAID) {
+      throw ApiError.conflict("This order has already been paid");
+    }
+
+    if (payment.status === PaymentStatus.REFUNDED) {
+      throw ApiError.conflict("This order payment has been refunded");
+    }
+
+    if (payment.status === PaymentStatus.PROCESSING) {
+      if (payment.providerPaymentId) {
+        return { claimed: false, payment };
+      }
+
+      const claimAge = Date.now() - payment.updatedAt.getTime();
+
+      if (claimAge < INITIATION_CLAIM_TIMEOUT_MS) {
+        throw ApiError.conflict(
+          "A payment initiation is already in progress for this order. Please wait a moment and try again.",
+        );
+      }
+    }
+
+    const snapshot: PaymentClaimSnapshot = {
+      status: payment.status,
+      providerPaymentId: payment.providerPaymentId,
+      providerReference: payment.providerReference,
+    };
+
+    const updated = await tx.payment.update({
+      where: { id: paymentId },
+      data: {
+        status: PaymentStatus.PROCESSING,
+        providerPaymentId: null,
+        providerReference: null,
+      },
+      select: paymentSelect,
+    });
+
+    await tx.order.update({
+      where: { id: orderId },
+      data: { paymentStatus: PaymentStatus.PROCESSING },
+    });
+
+    return { claimed: true, payment: updated, snapshot };
+  });
+
+const releasePaymentClaim = async (
+  orderId: string,
+  paymentId: string,
+  snapshot: PaymentClaimSnapshot,
+): Promise<void> => {
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
+
+      const current = await tx.payment.findUnique({
+        where: { id: paymentId },
+        select: { status: true, providerPaymentId: true },
+      });
+
+      // A callback or webhook may have advanced the payment while the gateway
+      // request was failing. Never roll back a payment that is no longer the
+      // claim we created.
+      if (
+        !current ||
+        current.status !== PaymentStatus.PROCESSING ||
+        current.providerPaymentId
+      ) {
+        return;
+      }
+
+      await tx.payment.update({
+        where: { id: paymentId },
+        data: {
+          status: snapshot.status,
+          providerPaymentId: snapshot.providerPaymentId,
+          providerReference: snapshot.providerReference,
+        },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { paymentStatus: snapshot.status },
+      });
+    });
+  } catch (error) {
+    console.error(
+      "[payment] Failed to release a failed payment initiation claim",
+      {
+        orderId,
+        paymentId,
+        error: error instanceof Error ? error.name : "UnknownError",
+      },
+    );
+  }
 };
 
 export const getPaymentById = async (
@@ -170,77 +522,64 @@ export const initiatePayment = async (
   const existingPayment = await loadPaymentRecord(order.payment.id);
 
   /**
-   * Stripe PaymentIntents are reusable while they are still awaiting customer
-   * action. Reuse the existing intent instead of creating a second one every
-   * time the customer refreshes or retries the card page.
+   * bKash, Nagad and Stripe sessions are reusable while the customer is still
+   * on the provider page. Re-check the existing session before creating a new
+   * one so a page refresh or double click cannot leave an orphaned gateway
+   * payment that could later be paid by the customer.
    */
   if (
-    order.paymentMethod === PaymentMethod.CARD &&
     existingPayment.status === PaymentStatus.PROCESSING &&
     existingPayment.providerPaymentId
   ) {
-    const verification = await provider.verify(
-      {
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        amount: order.totalAmount.toFixed(2),
-        providerPaymentId: existingPayment.providerPaymentId,
-      },
-      { paymentIntentId: existingPayment.providerPaymentId },
+    const resumed = await resumeProcessingPayment(
+      order,
+      provider,
+      existingPayment,
     );
 
-    if (verification.status === "PAID") {
-      await orderService.confirmPaymentForOrder(
-        order.id,
-        verification.transactionId,
-        verification.providerReference,
-        verification.providerPaymentId,
-        verification.providerResponse,
-      );
-
-      return {
-        payment: toPaymentResponse(await loadPaymentRecord(order.payment.id)),
-        method: PaymentMethod.CARD,
-        paymentStatus: PaymentStatus.PAID,
-        message: "This card payment has already been confirmed.",
-        providerPaymentId: verification.providerPaymentId ?? null,
-      };
-    }
-
-    if (verification.status === "PENDING") {
-      await prisma.$transaction([
-        prisma.payment.update({
-          where: { id: existingPayment.id },
-          data: {
-            status: PaymentStatus.PROCESSING,
-            providerPaymentId:
-              verification.providerPaymentId ??
-              existingPayment.providerPaymentId,
-            providerResponse: verification.providerResponse,
-          },
-        }),
-        prisma.order.update({
-          where: { id: order.id },
-          data: { paymentStatus: PaymentStatus.PROCESSING },
-        }),
-      ]);
-
-      const payment = await loadPaymentRecord(existingPayment.id);
-
-      return {
-        payment: toPaymentResponse(payment),
-        method: PaymentMethod.CARD,
-        paymentStatus: PaymentStatus.PROCESSING,
-        message: verification.clientSecret
-          ? "Resume the existing card payment session"
-          : "A card payment is already processing for this order. Please wait for the provider to confirm it.",
-        clientSecret: verification.clientSecret,
-        providerPaymentId: payment.providerPaymentId,
-      };
+    if (resumed) {
+      return resumed;
     }
   }
 
-  const initiation = await provider.initiate(order);
+  const claim = await claimPaymentForInitiation(
+    order.id,
+    existingPayment.id,
+  );
+
+  if (!claim.claimed) {
+    if (claim.payment.providerPaymentId) {
+      const resumed = await resumeProcessingPayment(
+        order,
+        provider,
+        claim.payment,
+      );
+
+      if (resumed) {
+        return resumed;
+      }
+    }
+
+    throw ApiError.conflict(
+      "A payment is already being initiated for this order. Please wait a moment and try again.",
+    );
+  }
+
+  let initiation: PaymentInitiationResult;
+
+  try {
+    initiation = await provider.initiate(order);
+  } catch (error) {
+    if (claim.snapshot) {
+      await releasePaymentClaim(
+        order.id,
+        existingPayment.id,
+        claim.snapshot,
+      );
+    }
+
+    throw error;
+  }
 
   await prisma.$transaction([
     prisma.payment.update({
@@ -275,7 +614,11 @@ export const initiatePayment = async (
 const findPaymentForCallback = async (
   callbackData: Record<string, string>,
 ): Promise<PaymentRecord & { orderId: string }> => {
-  const orderId = callbackData.orderId?.trim();
+  const orderId =
+    callbackData.orderId?.trim() ||
+    callbackData.order_id?.trim() ||
+    callbackData.orderID?.trim() ||
+    callbackData.merchantOrderId?.trim();
   const providerPaymentId =
     callbackData.paymentID?.trim() ||
     callbackData.payment_ref_id?.trim() ||
@@ -328,6 +671,11 @@ const markPaymentCancelled = async (
   verification: ProviderVerificationResult,
 ): Promise<void> => {
   await prisma.$transaction(async (tx) => {
+    // Serialize cancellation with payment confirmation. Without this lock a
+    // late cancellation callback could overwrite a payment that another
+    // callback has just verified as PAID.
+    await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
+
     const current = await tx.payment.findUnique({
       where: { id: paymentId },
       select: { status: true },
@@ -391,7 +739,6 @@ export const handleProviderCallback = async (
 
   if (
     payment.status === PaymentStatus.PAID ||
-    payment.status === PaymentStatus.CANCELLED ||
     payment.status === PaymentStatus.REFUNDED
   ) {
     return toPaymentResponse(payment);
@@ -422,7 +769,10 @@ export const handleProviderCallback = async (
       verification.transactionId,
       verification.providerReference,
       verification.providerPaymentId,
-      verification.providerResponse,
+      mergeProviderResponses(
+        payment.providerResponse,
+        verification.providerResponse,
+      ),
     );
   } else if (verification.status === "FAILED") {
     await orderService.markPaymentFailedForOrder(
@@ -432,21 +782,42 @@ export const handleProviderCallback = async (
   } else if (verification.status === "CANCELLED") {
     await markPaymentCancelled(payment.orderId, payment.id, verification);
   } else {
-    await prisma.$transaction([
-      prisma.payment.update({
+    await prisma.$transaction(async (tx) => {
+      // A provider can retry callbacks. Never let a stale "still pending"
+      // response overwrite a terminal payment state set by another callback.
+      await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${payment.orderId}::uuid FOR UPDATE`;
+
+      const current = await tx.payment.findUnique({
+        where: { id: payment.id },
+        select: { status: true },
+      });
+
+      if (
+        !current ||
+        (current.status !== PaymentStatus.PENDING &&
+          current.status !== PaymentStatus.PROCESSING)
+      ) {
+        return;
+      }
+
+      await tx.payment.update({
         where: { id: payment.id },
         data: {
           status: PaymentStatus.PROCESSING,
           providerPaymentId:
             verification.providerPaymentId ?? payment.providerPaymentId,
-          providerResponse: verification.providerResponse,
+          providerResponse: mergeProviderResponses(
+            payment.providerResponse,
+            verification.providerResponse,
+          ),
         },
-      }),
-      prisma.order.update({
+      });
+
+      await tx.order.update({
         where: { id: payment.orderId },
         data: { paymentStatus: PaymentStatus.PROCESSING },
-      }),
-    ]);
+      });
+    });
   }
 
   return toPaymentResponse(await loadPaymentRecord(payment.id));
@@ -562,6 +933,61 @@ export const handleCardWebhook = async (
       return { processed: true, payment: toPaymentResponse(payment) };
     }
 
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: { orderNumber: true, totalAmount: true },
+    });
+
+    if (!order) {
+      return { processed: false, payment: null };
+    }
+
+    const provider = getPaymentProvider(payment.method);
+
+    if (!provider) {
+      return { processed: false, payment: null };
+    }
+
+    // A webhook signature proves the event is authentic, but it does not prove
+    // ordering. Fetch the intent before writing a terminal failure so a late
+    // "failed" event can never overwrite an intent that actually succeeded.
+    const verification = await provider.verify(
+      {
+        orderId,
+        orderNumber: order.orderNumber,
+        amount: order.totalAmount.toFixed(2),
+        providerPaymentId: intentId,
+      },
+      { paymentIntentId: intentId },
+    );
+
+    if (verification.status === "PAID") {
+      await orderService.confirmPaymentForOrder(
+        orderId,
+        verification.transactionId,
+        verification.providerReference,
+        verification.providerPaymentId,
+        mergeProviderResponses(
+          payment.providerResponse,
+          verification.providerResponse,
+        ),
+      );
+
+      return {
+        processed: true,
+        payment: toPaymentResponse(await loadPaymentRecord(payment.id)),
+      };
+    }
+
+    if (verification.status === "CANCELLED") {
+      await markPaymentCancelled(orderId, payment.id, verification);
+
+      return {
+        processed: true,
+        payment: toPaymentResponse(await loadPaymentRecord(payment.id)),
+      };
+    }
+
     const reason =
       typeof object.last_payment_error === "object" &&
       object.last_payment_error !== null
@@ -570,44 +996,62 @@ export const handleCardWebhook = async (
               event.type,
           )
         : event.type;
+    const nextStatus =
+      event.type === "payment_intent.canceled"
+        ? PaymentStatus.CANCELLED
+        : PaymentStatus.FAILED;
 
-    await prisma.payment.update({
-      where: { id: payment.id },
-      data: {
-        status:
-          event.type === "payment_intent.canceled"
-            ? PaymentStatus.CANCELLED
-            : PaymentStatus.FAILED,
-        providerPaymentId: intentId ?? payment.providerPaymentId,
-        providerResponse: JSON.parse(JSON.stringify(event)),
-      },
-    });
+    await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
 
-    await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        paymentStatus:
-          event.type === "payment_intent.canceled"
-            ? PaymentStatus.CANCELLED
-            : PaymentStatus.FAILED,
-      },
-    });
+      const current = await tx.payment.findUnique({
+        where: { id: payment.id },
+        select: { status: true },
+      });
 
-    const order = await prisma.order.findUnique({
-      where: { id: orderId },
-      select: { userId: true, orderNumber: true },
-    });
+      if (
+        !current ||
+        current.status === PaymentStatus.PAID ||
+        current.status === PaymentStatus.FAILED ||
+        current.status === PaymentStatus.CANCELLED ||
+        current.status === PaymentStatus.REFUNDED
+      ) {
+        return;
+      }
 
-    if (order) {
-      await prisma.notification.create({
+      await tx.payment.update({
+        where: { id: payment.id },
         data: {
-          userId: order.userId,
-          title: "Card payment failed",
-          message: `Card payment for order ${order.orderNumber} failed: ${reason}`,
+          status: nextStatus,
+          providerPaymentId: intentId ?? payment.providerPaymentId,
+          providerResponse: JSON.parse(JSON.stringify(event)),
+        },
+      });
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: { paymentStatus: nextStatus },
+      });
+
+      await tx.notification.create({
+        data: {
+          userId: (
+            await tx.order.findUniqueOrThrow({
+              where: { id: orderId },
+              select: { userId: true },
+            })
+          ).userId,
+          title:
+            nextStatus === PaymentStatus.CANCELLED
+              ? "Card payment cancelled"
+              : "Card payment failed",
+          message: `Card payment for order ${order.orderNumber} ${
+            nextStatus === PaymentStatus.CANCELLED ? "was cancelled" : "failed"
+          }: ${reason}`,
           type: "PAYMENT",
         },
       });
-    }
+    });
 
     return {
       processed: true,
@@ -688,27 +1132,31 @@ export const handleProviderWebhook = async (
     throw ApiError.unauthorized("Invalid payment webhook signature");
   }
 
-  if (input.status === "PAID") {
-    await orderService.confirmPaymentForOrder(
-      input.orderId,
-      input.transactionId,
-      input.providerReference,
-    );
-  } else {
-    await orderService.markPaymentFailedForOrder(
-      input.orderId,
-      input.providerReference,
-    );
-  }
-
   const payment = await prisma.payment.findUnique({
     where: { orderId: input.orderId },
-    select: paymentSelect,
+    select: { providerPaymentId: true },
   });
 
   if (!payment) {
     throw ApiError.notFound("Payment not found");
   }
 
-  return toPaymentResponse(payment);
+  if (!payment.providerPaymentId) {
+    throw ApiError.badRequest(
+      "Payment was not initiated with a provider reference",
+    );
+  }
+
+  /**
+   * The webhook body is authenticated by the shared secret, but the caller is
+   * still not allowed to declare a payment successful. Resolve the
+   * authoritative status from the gateway, exactly like a provider callback.
+   * The input status is intentionally not trusted.
+   */
+  return handleProviderCallback({
+    orderId: input.orderId,
+    paymentID: payment.providerPaymentId,
+    paymentReferenceId: payment.providerPaymentId,
+    paymentIntentId: payment.providerPaymentId,
+  });
 };

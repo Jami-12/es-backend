@@ -149,6 +149,7 @@ model User {
   financialTransactions   FinancialTransaction[]
   inventoryLogs           InventoryLog[]
   productDiscountsCreated ProductDiscount[]      @relation("ProductDiscountCreatedBy")
+  paymentsCollected       Payment[]              @relation("PaymentCollectedBy")
 
   @@index([role])
   @@index([status])
@@ -181,14 +182,39 @@ model Brand {
   slug        String   @unique @db.VarChar(160)
   logo        String?  @db.Text
   description String?  @db.Text
+  isActive    Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   products Product[]
 
   @@index([name])
+  @@index([isActive])
   @@index([createdAt])
   @@map("brands")
+}
+
+enum BannerPlacement {
+  HERO
+  PROMO
+}
+
+model Banner {
+  id          String          @id @default(uuid()) @db.Uuid
+  title       String          @db.VarChar(160)
+  subtitle    String?         @db.VarChar(300)
+  imageUrl    String          @db.Text
+  publicId    String?         @unique @db.VarChar(255)
+  linkUrl     String?         @db.Text
+  placement   BannerPlacement @default(PROMO)
+  isActive    Boolean         @default(true)
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@index([placement, isActive, sortOrder])
+  @@index([isActive])
+  @@map("banners")
 }
 
 model Product {
@@ -426,14 +452,20 @@ model Payment {
   providerResponse  Json?
   idempotencyKey    String?       @unique @db.VarChar(160)
   paidAt            DateTime?
+  collectedById     String?       @db.Uuid
+  collectedByName   String?       @db.VarChar(120)
+  collectedAt       DateTime?
+  collectionNote    String?       @db.Text
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order       Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  collectedBy User? @relation("PaymentCollectedBy", fields: [collectedById], references: [id], onDelete: SetNull)
 
   @@index([status])
   @@index([method])
   @@index([providerPaymentId])
+  @@index([collectedById])
   @@index([createdAt])
   @@map("payments")
 }

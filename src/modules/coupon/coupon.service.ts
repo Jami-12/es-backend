@@ -8,6 +8,7 @@ import type {
   CouponResponse,
   CreateCouponInput,
   UpdateCouponInput,
+  UpdateCouponStatusInput,
 } from "../../types/coupon.types";
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
@@ -139,10 +140,10 @@ export const createCoupon = async (
   input: CreateCouponInput,
   ipAddress?: string,
 ): Promise<CouponResponse> => {
-  if (
-    (input.discountPercent === undefined) ===
-    (input.discountAmount === undefined)
-  ) {
+  const discountPercent = input.discountPercent ?? null;
+  const discountAmount = input.discountAmount ?? null;
+
+  if ((discountPercent === null) === (discountAmount === null)) {
     throw ApiError.badRequest(
       "Provide exactly one of discountPercent or discountAmount",
     );
@@ -171,19 +172,17 @@ export const createCoupon = async (
       code,
       description: input.description?.trim() || null,
       discountPercent:
-        input.discountPercent !== undefined
-          ? toDecimal(input.discountPercent)
-          : null,
+        discountPercent !== null ? toDecimal(discountPercent) : null,
       discountAmount:
-        input.discountAmount !== undefined
-          ? toDecimal(input.discountAmount)
-          : null,
+        discountAmount !== null ? toDecimal(discountAmount) : null,
       minimumAmount:
-        input.minimumAmount !== undefined
+        input.minimumAmount !== undefined && input.minimumAmount !== null
           ? toDecimal(input.minimumAmount)
           : null,
       maxDiscount:
-        input.maxDiscount !== undefined ? toDecimal(input.maxDiscount) : null,
+        input.maxDiscount !== undefined && input.maxDiscount !== null
+          ? toDecimal(input.maxDiscount)
+          : null,
       usageLimit: input.usageLimit ?? null,
       isActive: input.isActive ?? true,
       startDate,
@@ -351,6 +350,37 @@ export const updateCoupon = async (
   return toCouponResponse(coupon);
 };
 
+export const updateCouponStatus = async (
+  actorId: string,
+  couponId: string,
+  input: UpdateCouponStatusInput,
+  ipAddress?: string,
+): Promise<CouponResponse> => {
+  const existing = await prisma.coupon.findUnique({ where: { id: couponId } });
+
+  if (!existing) {
+    throw ApiError.notFound("Coupon not found");
+  }
+
+  const coupon = await prisma.coupon.update({
+    where: { id: couponId },
+    data: { isActive: input.isActive },
+  });
+
+  await recordAudit({
+    userId: actorId,
+    action: input.isActive ? "ENABLE_COUPON" : "DISABLE_COUPON",
+    entity: "Coupon",
+    entityId: coupon.id,
+    description: `${input.isActive ? "Enabled" : "Disabled"} coupon ${coupon.code}`,
+    oldData: { isActive: existing.isActive },
+    newData: { isActive: coupon.isActive },
+    ipAddress,
+  });
+
+  return toCouponResponse(coupon);
+};
+
 export const deleteCoupon = async (
   actorId: string,
   couponId: string,
@@ -378,38 +408,47 @@ export const deleteCoupon = async (
 export const validateCouponForUser = async (
   userId: string,
   code: string,
+  providedSubtotal?: number,
 ): Promise<{
   coupon: CouponResponse;
   subtotal: number;
   discountAmount: number;
   totalAfterDiscount: number;
 }> => {
-  const cart = await prisma.cart.findUnique({
-    where: { userId },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: { price: true, discountPrice: true },
+  let subtotal: number;
+
+  if (providedSubtotal !== undefined) {
+    subtotal = roundMoney(providedSubtotal);
+  } else {
+    const cart = await prisma.cart.findUnique({
+      where: { userId },
+      include: {
+        items: {
+          include: {
+            product: {
+              select: { price: true, discountPrice: true },
+            },
           },
         },
       },
-    },
-  });
+    });
 
-  if (!cart || cart.items.length === 0) {
-    throw ApiError.badRequest("Your cart is empty");
+    if (!cart || cart.items.length === 0) {
+      throw ApiError.badRequest(
+        "Your cart is empty. Provide a subtotal to validate a coupon without a cart.",
+      );
+    }
+
+    subtotal = roundMoney(
+      cart.items.reduce((sum, item) => {
+        const unitPrice = effectivePrice(
+          item.product.price,
+          item.product.discountPrice,
+        ).toNumber();
+        return sum + unitPrice * item.quantity;
+      }, 0),
+    );
   }
-
-  const subtotal = roundMoney(
-    cart.items.reduce((sum, item) => {
-      const unitPrice = effectivePrice(
-        item.product.price,
-        item.product.discountPrice,
-      ).toNumber();
-      return sum + unitPrice * item.quantity;
-    }, 0),
-  );
 
   const { coupon, discountAmount } = await resolveCoupon(code, subtotal);
 

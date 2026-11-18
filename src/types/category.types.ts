@@ -3,8 +3,9 @@ import type { PaginatedResult } from "./common.types";
 export interface CreateCategoryInput {
   name: string;
   slug?: string;
-  description?: string;
-  image?: string;
+  description?: string | null;
+  image?: string | null;
+  isActive?: boolean;
 }
 
 export interface UpdateCategoryInput {
@@ -12,10 +13,16 @@ export interface UpdateCategoryInput {
   slug?: string;
   description?: string | null;
   image?: string | null;
+  isActive?: boolean;
+}
+
+export interface UpdateCategoryStatusInput {
+  isActive: boolean;
 }
 
 export interface CategoryListQuery {
   search?: string;
+  isActive?: boolean;
 }
 
 export interface CategoryResponse {
@@ -24,6 +31,7 @@ export interface CategoryResponse {
   slug: string;
   description: string | null;
   image: string | null;
+  isActive: boolean;
   productCount: number;
   createdAt: string;
   updatedAt: string;
