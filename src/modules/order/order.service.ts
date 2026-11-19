@@ -29,6 +29,7 @@ import {
   generateTransactionId,
 } from "../../utils/receipt";
 import { resolveCoupon } from "../coupon/coupon.service";
+import { notifyCustomerAndAdmins } from "../notification/notification-events";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   CheckoutInput,
@@ -193,9 +194,14 @@ const createNotification = async (
   title: string,
   message: string,
   type: "ORDER" | "PAYMENT" = "ORDER",
+  adminMessage?: string,
 ): Promise<void> => {
-  await tx.notification.create({
-    data: { userId, title, message, type },
+  await notifyCustomerAndAdmins(tx, {
+    customerId: userId,
+    title,
+    message,
+    type,
+    adminMessage,
   });
 };
 
@@ -463,6 +469,7 @@ export const checkout = async (
       "Order placed",
       `Your order ${createdOrder.orderNumber} has been placed successfully.`,
       "ORDER",
+      `New order ${createdOrder.orderNumber} placed by ${createdOrder.user.name} for ${createdOrder.totalAmount.toFixed(2)}.`,
     );
 
     if (input.paymentMethod === PaymentMethod.CASH_ON_DELIVERY) {
@@ -472,6 +479,7 @@ export const checkout = async (
         "Order confirmed",
         `Your order ${createdOrder.orderNumber} is confirmed. Payment will be collected on delivery.`,
         "ORDER",
+        `Order ${createdOrder.orderNumber} is confirmed and awaiting cash collection on delivery.`,
       );
     }
 
@@ -693,6 +701,7 @@ const applyStatusChange = async (
       "Cash payment due",
       `Your order ${order.orderNumber} has been delivered. Please keep ${order.payment.amount.toFixed(2)} ready for collection.`,
       "PAYMENT",
+      `Order ${order.orderNumber} was delivered with ${order.payment.amount.toFixed(2)} cash still to collect.`,
     );
   }
 
@@ -711,6 +720,7 @@ const applyStatusChange = async (
       title,
       `Your order ${order.orderNumber} status is now ${nextStatus}.`,
       nextStatus === OrderStatus.DELIVERED ? "PAYMENT" : "ORDER",
+      `Order ${order.orderNumber} status changed to ${nextStatus}.`,
     );
   }
 
@@ -858,6 +868,7 @@ export const collectCashOnDeliveryPayment = async (
       "Payment received",
       `Cash payment of ${order.payment.amount.toFixed(2)} for order ${order.orderNumber} has been recorded. Thank you.`,
       "PAYMENT",
+      `Cash payment of ${order.payment.amount.toFixed(2)} for order ${order.orderNumber} was collected by ${actor.name}.`,
     );
 
     await recordAudit(
@@ -1044,6 +1055,7 @@ export const confirmPaymentForOrder = async (
       "Payment successful",
       `Payment for order ${order.orderNumber} has been completed successfully.`,
       "PAYMENT",
+      `Payment of ${order.payment.amount.toFixed(2)} for order ${order.orderNumber} completed successfully.`,
     );
 
     return refreshed;
@@ -1115,6 +1127,7 @@ export const markPaymentFailedForOrder = async (
       "Payment failed",
       `Payment for order ${order.orderNumber} could not be completed.`,
       "PAYMENT",
+      `Payment for order ${order.orderNumber} failed${reason?.trim() ? `: ${reason.trim()}` : ""}.`,
     );
 
     const refreshed = await tx.order.findUnique({

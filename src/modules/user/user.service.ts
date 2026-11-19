@@ -274,10 +274,24 @@ export const updateSelfProfile = async (
     throw ApiError.notFound("User account not found");
   }
 
+  const email = input.email?.trim().toLowerCase();
+
+  if (email && email !== target.email) {
+    const duplicate = await prisma.user.findFirst({
+      where: { email, id: { not: userId } },
+      select: { id: true },
+    });
+
+    if (duplicate) {
+      throw ApiError.conflict("An account with this email already exists");
+    }
+  }
+
   const updatedUser = await prisma.user.update({
     where: { id: userId },
     data: {
       ...(input.name !== undefined && { name: input.name.trim() }),
+      ...(email !== undefined && { email }),
       ...(input.phone !== undefined && {
         phone: input.phone?.trim() || null,
       }),

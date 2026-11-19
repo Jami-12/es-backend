@@ -168,7 +168,8 @@ model Category {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  products Product[]
+  products             Product[]
+  homeCategorySections HomeCategorySection[]
 
   @@index([name])
   @@index([isActive])
@@ -200,21 +201,61 @@ enum BannerPlacement {
 }
 
 model Banner {
-  id          String          @id @default(uuid()) @db.Uuid
-  title       String          @db.VarChar(160)
-  subtitle    String?         @db.VarChar(300)
-  imageUrl    String          @db.Text
-  publicId    String?         @unique @db.VarChar(255)
-  linkUrl     String?         @db.Text
-  placement   BannerPlacement @default(PROMO)
-  isActive    Boolean         @default(true)
-  sortOrder   Int             @default(0)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  id        String          @id @default(uuid()) @db.Uuid
+  title     String          @db.VarChar(160)
+  subtitle  String?         @db.VarChar(300)
+  imageUrl  String          @db.Text
+  publicId  String?         @unique @db.VarChar(255)
+  linkUrl   String?         @db.Text
+  placement BannerPlacement @default(PROMO)
+  isActive  Boolean         @default(true)
+  sortOrder Int             @default(0)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
 
   @@index([placement, isActive, sortOrder])
   @@index([isActive])
   @@map("banners")
+}
+
+/// Singleton row (id = "default") holding storefront presentation settings.
+model SiteSettings {
+  id                   String   @id @default("default") @db.VarChar(40)
+  siteName             String?  @db.VarChar(120)
+  navbarLogoUrl        String?  @db.Text
+  navbarLogoPublicId   String?  @db.VarChar(255)
+  showHero             Boolean  @default(true)
+  showProductFinder    Boolean  @default(true)
+  showMiddleCategories Boolean  @default(true)
+  showCategorySections Boolean  @default(true)
+  showNewArrivals      Boolean  @default(true)
+  showBrands           Boolean  @default(true)
+  showPromoBanners     Boolean  @default(true)
+  showNewsletter       Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  categorySections HomeCategorySection[]
+
+  @@map("site_settings")
+}
+
+/// Per-category visibility of the home page category sections.
+model HomeCategorySection {
+  id         String   @id @default(uuid()) @db.Uuid
+  settingsId String   @db.VarChar(40)
+  categoryId String   @db.Uuid
+  isVisible  Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  settings SiteSettings @relation(fields: [settingsId], references: [id], onDelete: Cascade)
+  category Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([settingsId, categoryId])
+  @@index([settingsId, sortOrder])
+  @@map("home_category_sections")
 }
 
 model Product {

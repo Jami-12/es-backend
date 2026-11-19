@@ -62,6 +62,7 @@ export const updateUserSchema = z
 export const updateSelfProfileSchema = z
   .object({
     name: nameSchema.optional(),
+    email: emailSchema.optional(),
     phone: phoneSchema.nullable().optional(),
     image: imageSchema.optional(),
   })

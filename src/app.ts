@@ -96,6 +96,7 @@ app.get("/", (_req, res) => {
         salaries: "/api/v1/salaries",
         inventory: "/api/v1/inventory",
         accounting: "/api/v1/accounting",
+        settings: "/api/v1/settings",
       },
     },
     message: "Welcome to 3D E-Commerce API Server",

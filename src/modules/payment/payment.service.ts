@@ -13,6 +13,7 @@ import type {
 } from "../../types/payment.types";
 import type { OrderResponse } from "../../types/order.types";
 import * as orderService from "../order/order.service";
+import { notifyCustomerAndAdmins } from "../notification/notification-events";
 import { getPaymentProvider } from "./providers";
 import { verifyStripeWebhookSignature } from "./providers/card.provider";
 import type {
@@ -581,9 +582,11 @@ export const initiatePayment = async (
     throw error;
   }
 
-  await prisma.$transaction([
-    prisma.payment.update({
-      where: { id: order.payment.id },
+  const initiatingPaymentId = order.payment.id;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.payment.update({
+      where: { id: initiatingPaymentId },
       data: {
         method: order.paymentMethod,
         status: initiation.paymentStatus,
@@ -591,12 +594,27 @@ export const initiatePayment = async (
         providerReference: initiation.providerReference ?? null,
         providerResponse: initiation.providerResponse,
       },
-    }),
-    prisma.order.update({
+    });
+    await tx.order.update({
       where: { id: order.id },
       data: { paymentStatus: initiation.paymentStatus },
-    }),
-  ]);
+    });
+
+    // Notify once when an order actually moves into PROCESSING. Retries that
+    // merely resume an existing gateway session must not duplicate the alert.
+    if (
+      initiation.paymentStatus === PaymentStatus.PROCESSING &&
+      claim.snapshot?.status !== PaymentStatus.PROCESSING
+    ) {
+      await notifyCustomerAndAdmins(tx, {
+        customerId: order.userId,
+        title: "Payment processing",
+        message: `Payment for order ${order.orderNumber} is being processed.`,
+        type: "PAYMENT",
+        adminMessage: `Payment for order ${order.orderNumber} is processing with ${order.paymentMethod}.`,
+      });
+    }
+  });
 
   const payment = await loadPaymentRecord(order.payment.id);
 
@@ -714,13 +732,12 @@ const markPaymentCancelled = async (
       select: { orderNumber: true, userId: true },
     });
 
-    await tx.notification.create({
-      data: {
-        userId: order.userId,
-        title: "Payment cancelled",
-        message: `Payment for order ${order.orderNumber} was cancelled. You can retry payment from your order.`,
-        type: "PAYMENT",
-      },
+    await notifyCustomerAndAdmins(tx, {
+      customerId: order.userId,
+      title: "Payment cancelled",
+      message: `Payment for order ${order.orderNumber} was cancelled. You can retry payment from your order.`,
+      type: "PAYMENT",
+      adminMessage: `Payment for order ${order.orderNumber} was cancelled.`,
     });
   });
 };
@@ -935,7 +952,7 @@ export const handleCardWebhook = async (
 
     const order = await prisma.order.findUnique({
       where: { id: orderId },
-      select: { orderNumber: true, totalAmount: true },
+      select: { orderNumber: true, totalAmount: true, userId: true },
     });
 
     if (!order) {
@@ -1033,23 +1050,19 @@ export const handleCardWebhook = async (
         data: { paymentStatus: nextStatus },
       });
 
-      await tx.notification.create({
-        data: {
-          userId: (
-            await tx.order.findUniqueOrThrow({
-              where: { id: orderId },
-              select: { userId: true },
-            })
-          ).userId,
-          title:
-            nextStatus === PaymentStatus.CANCELLED
-              ? "Card payment cancelled"
-              : "Card payment failed",
-          message: `Card payment for order ${order.orderNumber} ${
-            nextStatus === PaymentStatus.CANCELLED ? "was cancelled" : "failed"
-          }: ${reason}`,
-          type: "PAYMENT",
-        },
+      await notifyCustomerAndAdmins(tx, {
+        customerId: order.userId,
+        title:
+          nextStatus === PaymentStatus.CANCELLED
+            ? "Card payment cancelled"
+            : "Card payment failed",
+        message: `Card payment for order ${order.orderNumber} ${
+          nextStatus === PaymentStatus.CANCELLED ? "was cancelled" : "failed"
+        }: ${reason}`,
+        type: "PAYMENT",
+        adminMessage: `Card payment for order ${order.orderNumber} ${
+          nextStatus === PaymentStatus.CANCELLED ? "was cancelled" : "failed"
+        }: ${reason}`,
       });
     });
 

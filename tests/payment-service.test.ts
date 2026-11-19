@@ -227,6 +227,10 @@ const fakePrisma: Record<string, unknown> = {
       return { ...state.order };
     },
   },
+  user: {
+    // No admin accounts in the fixture: order alerts are delivered to the customer only.
+    findMany: async () => [],
+  },
   notification: {
     create: async ({ data }: { data: Record<string, unknown> }) => {
       state.notifications.push(data);
