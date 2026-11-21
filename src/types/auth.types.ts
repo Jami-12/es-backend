@@ -62,3 +62,25 @@ export interface AuthResult {
   tokenType: "Bearer";
   expiresIn: string;
 }
+
+export interface SendPasswordResetCodeInput {
+  email: string;
+}
+
+export interface VerifyPasswordResetCodeInput {
+  email: string;
+  code: string;
+}
+
+/** Reset accepts either a token from verify-code or email + code directly. */
+export interface ResetPasswordInput {
+  resetToken?: string;
+  email?: string;
+  code?: string;
+  newPassword: string;
+}
+
+export interface PasswordResetVerification {
+  resetToken: string;
+  expiresIn: string;
+}

@@ -4,6 +4,9 @@ import type { ProductDiscountResponse } from "./product.types";
 export interface AddCartItemInput {
   productId: string;
   quantity: number;
+  /** Empty string means the product has no size/colour selection. */
+  selectedSize?: string;
+  selectedColor?: string;
 }
 
 export interface UpdateCartItemInput {
@@ -27,6 +30,8 @@ export interface CartProductSummary {
 export interface CartItemResponse {
   id: string;
   productId: string;
+  selectedSize: string | null;
+  selectedColor: string | null;
   quantity: number;
   unitPrice: number;
   originalPrice: number;

@@ -11,6 +11,9 @@ export interface NotificationListQuery {
 export interface NotificationResponse {
   id: string;
   userId: string;
+  /** Present for order notifications so the UI can open the exact order. */
+  orderId: string | null;
+  eventType: string | null;
   title: string;
   message: string;
   type: NotificationType;

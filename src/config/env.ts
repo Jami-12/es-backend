@@ -148,6 +148,8 @@ const envSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
     PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+    // Injected by Vercel at build and runtime; used to trust edge hop headers.
+    VERCEL: optionalString,
 
     DATABASE_URL: databaseUrlSchema,
 
@@ -183,6 +185,27 @@ const envSchema = z
     STORE_PHONE: z.string().trim().min(1).default("+8801000000000"),
     STORE_EMAIL: z.string().trim().email().default("support@example.com"),
     STORE_CURRENCY: currencySchema.default("BDT"),
+
+    // Email delivery is opt-in: the server starts normally when these are
+    // absent, and the mailer reports a 503 only when an email is requested.
+    SMTP_ENABLED: booleanFromEnv.default(false),
+    SMTP_HOST: optionalString,
+    SMTP_PORT: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().int().min(1).max(65535).optional(),
+    ),
+    SMTP_USER: optionalString,
+    // Passwords may legitimately contain leading/trailing whitespace.
+    SMTP_PASS: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+    SMTP_FROM: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .email("SMTP_FROM must be a valid email address")
+        .optional(),
+    ),
+    SMTP_SECURE: booleanFromEnv.default(false),
 
     SHIPPING_FLAT_RATE: z.coerce.number().min(0).default(60),
     FREE_SHIPPING_THRESHOLD: z.coerce.number().min(0).default(1000),
@@ -345,6 +368,17 @@ const envSchema = z
       ["CLOUDINARY_API_SECRET", value.CLOUDINARY_API_SECRET],
     ]);
 
+    requireWhenEnabled(value.SMTP_ENABLED, "SMTP", [
+      ["SMTP_HOST", value.SMTP_HOST],
+      [
+        "SMTP_PORT",
+        value.SMTP_PORT === undefined ? undefined : String(value.SMTP_PORT),
+      ],
+      ["SMTP_USER", value.SMTP_USER],
+      ["SMTP_PASS", value.SMTP_PASS],
+      ["SMTP_FROM", value.SMTP_FROM],
+    ]);
+
     if (
       (value.BKASH_ENABLED || value.NAGAD_ENABLED) &&
       value.STORE_CURRENCY !== "BDT"
@@ -402,8 +436,10 @@ if (!parsed.success) {
     .map((issue) => `  - ${issue.path.join(".") || "ENV"}: ${issue.message}`)
     .join("\n");
 
-  console.error(`Invalid environment configuration:\n${formatted}`);
-  process.exit(1);
+  // Throwing (instead of process.exit) works in serverless functions too:
+  // the runtime reports the misconfiguration instead of silently killing the
+  // process without an invocation-level error.
+  throw new Error(`Invalid environment configuration:\n${formatted}`);
 }
 
 const rawEnv = parsed.data;

@@ -8,6 +8,10 @@ import {
 } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
+declare const process: {
+  env: Record<string, string | undefined>;
+};
+
 const prisma = new PrismaClient();
 
 interface SeedProduct {
@@ -423,7 +427,7 @@ async function main(): Promise<void> {
 main()
   .catch((error: unknown) => {
     console.error("Seed failed:", error);
-    process.exitCode = 1;
+    Object.assign(process, { exitCode: 1 });
   })
   .finally(async () => {
     await prisma.$disconnect();

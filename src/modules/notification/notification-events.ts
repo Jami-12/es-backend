@@ -1,14 +1,22 @@
 import { Prisma, Role, UserStatus } from "@prisma/client";
 
+/** Marks the notifications that represent a brand-new incoming order. */
+export const ORDER_PLACED_EVENT = "ORDER_PLACED";
+
 export interface OrderNotificationInput {
   /** Customer who owns the order. Always receives the customer-facing message. */
   customerId: string;
   title: string;
   message: string;
-  type?: "ORDER" | "PAYMENT";
+  /** All order/payment events are surfaced as order notifications. */
+  type?: "ORDER";
   /** Optional admin-facing wording (defaults to the customer message). */
   adminTitle?: string;
   adminMessage?: string;
+  /** Structured link to the order this notification is about. */
+  orderId?: string;
+  /** Stable event key used by the shop/admin inbox to filter incoming orders. */
+  eventType?: string;
 }
 
 /**
@@ -38,16 +46,20 @@ export const notifyCustomerAndAdmins = async (
     ...admins.map((admin) => admin.id),
   ]);
 
-  for (const userId of recipients) {
-    const isAdmin = userId !== input.customerId;
+  await Promise.all(
+    [...recipients].map((userId) => {
+      const isAdmin = userId !== input.customerId;
 
-    await tx.notification.create({
-      data: {
-        userId,
-        title: isAdmin ? (input.adminTitle ?? input.title) : input.title,
-        message: isAdmin ? (input.adminMessage ?? input.message) : input.message,
-        type: input.type ?? "ORDER",
-      },
-    });
-  }
+      return tx.notification.create({
+        data: {
+          userId,
+          title: isAdmin ? (input.adminTitle ?? input.title) : input.title,
+          message: isAdmin ? (input.adminMessage ?? input.message) : input.message,
+          type: input.type ?? "ORDER",
+          orderId: input.orderId ?? null,
+          eventType: input.eventType ?? null,
+        },
+      });
+    }),
+  );
 };

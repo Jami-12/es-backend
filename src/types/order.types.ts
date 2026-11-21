@@ -56,6 +56,9 @@ export interface OrderItemResponse {
   productName: string;
   productImage: string | null;
   sku: string | null;
+  /** Nullable for historical orders placed before variants were stored. */
+  size: string | null;
+  color: string | null;
   unitPrice: number;
   originalPrice: number;
   discountAmount: number;
@@ -123,9 +126,21 @@ export interface OrderResponse {
 export interface ReceiptItem {
   productName: string;
   productImage: string | null;
+  size: string | null;
+  color: string | null;
   quantity: number;
   unitPrice: number;
   totalPrice: number;
+}
+
+export interface ReceiptDisplayOptions {
+  showLogo: boolean;
+  showSize: boolean;
+  showColor: boolean;
+  showPaymentMethod: boolean;
+  showTransactionId: boolean;
+  showCustomer: boolean;
+  showShippingAddress: boolean;
 }
 
 export interface ReceiptData {
@@ -134,11 +149,15 @@ export interface ReceiptData {
   issuedAt: string;
   store: {
     name: string;
+    tagline: string | null;
+    logoUrl: string | null;
+    footerNote: string;
     address: string;
     phone: string;
     email: string;
     currency: string;
   };
+  display: ReceiptDisplayOptions;
   customer: OrderCustomer;
   shippingAddress: OrderAddress | null;
   items: ReceiptItem[];
@@ -158,3 +177,37 @@ export interface ReceiptData {
 }
 
 export type PaginatedOrders = PaginatedResult<OrderResponse>;
+
+export interface OrderTrackingEvent {
+  label: string;
+  description: string;
+  completed: boolean;
+  current: boolean;
+  timestamp: string | null;
+}
+
+export interface OrderTrackingItem {
+  productName: string;
+  productImage: string | null;
+  size: string | null;
+  color: string | null;
+  quantity: number;
+  totalPrice: number;
+}
+
+export interface OrderTrackingResult {
+  orderNumber: string;
+  status: OrderStatus;
+  paymentStatus: PaymentStatus;
+  paymentMethod: PaymentMethod;
+  placedAt: string;
+  updatedAt: string;
+  itemCount: number;
+  totalAmount: number;
+  items: OrderTrackingItem[];
+  timeline: OrderTrackingEvent[];
+}
+
+export interface OrderTrackingQuery {
+  code: string;
+}

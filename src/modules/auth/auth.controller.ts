@@ -1,11 +1,15 @@
 import type {
   ChangePasswordInput,
   RefreshTokenInput,
+  ResetPasswordInput,
+  SendPasswordResetCodeInput,
+  VerifyPasswordResetCodeInput,
 } from "../../types/auth.types";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { sendSuccess } from "../../utils/ApiResponse";
 import { getAuthUser } from "../../utils/auth";
 import * as authService from "./auth.service";
+import * as forgotPasswordService from "./forgot-password.service";
 import * as googleOAuthService from "./google-oauth.service";
 
 export const register = asyncHandler(async (req, res) => {
@@ -57,6 +61,38 @@ export const changePassword = asyncHandler(async (req, res) => {
   sendSuccess(res, {
     data: null,
     message: "Password changed successfully",
+  });
+});
+
+export const sendPasswordResetCode = asyncHandler(async (req, res) => {
+  const input = req.body as SendPasswordResetCodeInput;
+  await forgotPasswordService.sendPasswordResetCode(input.email);
+
+  // Deliberately generic: the response does not reveal whether an account exists.
+  sendSuccess(res, {
+    data: null,
+    message:
+      "If an account exists for this email, a verification code has been sent.",
+  });
+});
+
+export const verifyPasswordResetCode = asyncHandler(async (req, res) => {
+  const result = await forgotPasswordService.verifyPasswordResetCode(
+    req.body as VerifyPasswordResetCodeInput,
+  );
+
+  sendSuccess(res, {
+    data: result,
+    message: "Verification code accepted",
+  });
+});
+
+export const resetPassword = asyncHandler(async (req, res) => {
+  await forgotPasswordService.resetPassword(req.body as ResetPasswordInput);
+
+  sendSuccess(res, {
+    data: null,
+    message: "Password reset successfully",
   });
 });
 

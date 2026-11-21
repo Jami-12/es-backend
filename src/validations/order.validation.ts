@@ -64,6 +64,18 @@ export const collectCodPaymentSchema = z.object({
   reference: z.string().trim().max(120, "Reference is too long").nullable().optional(),
 });
 
+/**
+ * Public tracking accepts an order number, receipt number or order id. Only a
+ * bounded, PII-free projection of the order is ever returned.
+ */
+export const orderTrackingQuerySchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .min(4, "Enter an order number or code")
+    .max(80, "Order code is too long"),
+});
+
 export const orderListQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),

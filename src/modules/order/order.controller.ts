@@ -2,12 +2,23 @@ import type {
   CheckoutInput,
   CollectCodPaymentInput,
   OrderListQuery,
+  OrderTrackingQuery,
   UpdateOrderStatusInput,
 } from "../../types/order.types";
 import { sendSuccess } from "../../utils/ApiResponse";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { getAuthUser } from "../../utils/auth";
 import * as orderService from "./order.service";
+
+export const trackOrder = asyncHandler(async (req, res) => {
+  const { code } = req.query as unknown as OrderTrackingQuery;
+  const tracking = await orderService.trackOrder(code);
+
+  sendSuccess(res, {
+    data: { tracking },
+    message: "Order status retrieved successfully",
+  });
+});
 
 export const checkout = asyncHandler(async (req, res) => {
   const user = getAuthUser(req);

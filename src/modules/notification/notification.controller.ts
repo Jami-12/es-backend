@@ -8,6 +8,7 @@ export const listNotifications = asyncHandler(async (req, res) => {
   const user = getAuthUser(req);
   const result = await notificationService.listNotifications(
     user.id,
+    user.role,
     req.query as unknown as NotificationListQuery,
   );
 
@@ -32,7 +33,7 @@ export const markNotificationRead = asyncHandler(async (req, res) => {
 
 export const markAllNotificationsRead = asyncHandler(async (req, res) => {
   const user = getAuthUser(req);
-  const result = await notificationService.markAllNotificationsRead(user.id);
+  const result = await notificationService.markAllNotificationsRead(user.id, user.role);
 
   sendSuccess(res, {
     data: result,

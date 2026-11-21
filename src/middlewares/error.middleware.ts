@@ -1,11 +1,11 @@
 import type { ErrorRequestHandler } from "express";
 import { Prisma } from "@prisma/client";
-import { JsonWebTokenError, TokenExpiredError } from "jsonwebtoken";
 import multer from "multer";
 import { ZodError } from "zod";
 import { env } from "../config/env";
 import { ApiError } from "../utils/ApiError";
 import { sendError } from "../utils/ApiResponse";
+import jwt from "../utils/jsonwebtoken";
 import { redactText, redactValue } from "../utils/redact";
 
 interface NormalizedError {
@@ -115,11 +115,11 @@ const normalizeError = (error: unknown): NormalizedError => {
     return normalizePrismaError(error);
   }
 
-  if (error instanceof TokenExpiredError) {
+  if (error instanceof jwt.TokenExpiredError) {
     return { statusCode: 401, message: "Access token has expired" };
   }
 
-  if (error instanceof JsonWebTokenError) {
+  if (error instanceof jwt.JsonWebTokenError) {
     return { statusCode: 401, message: "Invalid access token" };
   }
 

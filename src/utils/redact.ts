@@ -24,6 +24,8 @@ addSensitiveValue(env.STRIPE_SECRET_KEY);
 addSensitiveValue(env.STRIPE_WEBHOOK_SECRET);
 addSensitiveValue(env.CLOUDINARY_API_SECRET);
 addSensitiveValue(env.CLOUDINARY_API_KEY);
+addSensitiveValue(env.SMTP_PASS);
+addSensitiveValue(env.SMTP_USER);
 addSensitiveValue(env.GOOGLE_CLIENT_ID);
 addSensitiveValue(env.BKASH_APP_KEY);
 

@@ -61,6 +61,46 @@ const booleanQuerySchema = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+const hexColorSchema = z
+  .string()
+  .trim()
+  .regex(/^#[0-9a-fA-F]{6}$/, "Color must be a 6-digit hex value");
+
+const parseList = (value: unknown): unknown => {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+
+  if (!trimmed) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : trimmed.split(",");
+  } catch {
+    return trimmed.split(",");
+  }
+};
+
+const productSizesSchema = z.preprocess(
+  parseList,
+  z
+    .array(z.string().trim().min(1).max(24))
+    .max(30, "A product can have at most 30 sizes")
+    .optional(),
+);
+
+const productColorsSchema = z.preprocess(
+  parseList,
+  z
+    .array(
+      z.object({
+        name: z.string().trim().min(1).max(40),
+        hex: hexColorSchema,
+      }),
+    )
+    .max(30, "A product can have at most 30 colors")
+    .optional(),
+);
+
 const imageUrlSchema = z.string().trim().max(2000);
 
 const thumbnailSchema = z.preprocess(
@@ -194,6 +234,8 @@ const productPayloadSchema = z
     brandId: z.string().uuid("Invalid brand id").nullish(),
     brandName: nullableTextSchema(120, "Brand name"),
     modelUrl: modelUrlSchema.default(null),
+    sizes: productSizesSchema,
+    colors: productColorsSchema,
     positionX: coordinateSchema.default(0),
     positionY: coordinateSchema.default(0),
     positionZ: coordinateSchema.default(0),
@@ -273,6 +315,8 @@ export const updateProductSchema = z.preprocess(
       brandId: z.string().uuid("Invalid brand id").nullish(),
       brandName: nullableTextSchema(120, "Brand name"),
       modelUrl: modelUrlSchema,
+      sizes: productSizesSchema,
+      colors: productColorsSchema,
       positionX: coordinateSchema.optional(),
       positionY: coordinateSchema.optional(),
       positionZ: coordinateSchema.optional(),

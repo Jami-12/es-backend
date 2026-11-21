@@ -1,6 +1,8 @@
 import { PrismaClient } from "@prisma/client";
 import { env } from "./env";
 
+// Reuse the client across module reloads and warm serverless invocations.
+// Each Vercel instance gets one pool instead of a new client per invocation.
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined;
 };
@@ -11,9 +13,7 @@ export const prisma =
     log: env.isDevelopment ? ["warn", "error"] : ["error"],
   });
 
-if (!env.isProduction) {
-  globalForPrisma.prisma = prisma;
-}
+globalForPrisma.prisma = prisma;
 
 export const connectDatabase = async (): Promise<void> => {
   await prisma.$connect();

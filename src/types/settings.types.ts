@@ -47,3 +47,37 @@ export interface UpdateSettingsInput {
   showNewsletter?: boolean;
   categorySections?: HomeCategorySectionInput[];
 }
+
+export interface VerifyDataResetCodeInput {
+  code: string;
+}
+
+export interface ExecuteDataResetInput {
+  verificationToken: string;
+  confirmation: string;
+}
+
+export interface DataResetVerification {
+  verificationToken: string;
+  expiresIn: string;
+}
+
+/** Number of rows removed by a completed wipe, grouped by domain. */
+export interface DataResetSummary {
+  products: number;
+  categories: number;
+  brands: number;
+  banners: number;
+  coupons: number;
+  orders: number;
+  payments: number;
+  reviews: number;
+  carts: number;
+  wishlists: number;
+  notifications: number;
+  addresses: number;
+  financeRecords: number;
+  employees: number;
+  inventoryLogs: number;
+  totalRecords: number;
+}

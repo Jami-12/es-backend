@@ -20,7 +20,7 @@ Node.js, TypeScript, Express, Prisma and PostgreSQL backend for the 3D commerce 
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 24 (matches `engines.node` and the Vercel runtime)
 - npm
 - PostgreSQL database (local or hosted)
 
@@ -58,6 +58,21 @@ Copy-Item .env.example .env
 ```
 
 Fill in real values in `.env`. Never put real values in `.env.example`, README files, source code or chat messages.
+
+### Vercel Deployment
+
+Vercel's zero-configuration Express support detects `src/app.ts` and deploys its default-exported Express app as one serverless function. It forwards `/`, `/health` and `/api/v1/*` without a catch-all rewrite, so Express receives and matches the original paths.
+
+The port listener in `src/server.ts` is only used for local/container runs. `npm run build` emits ESM `dist/server.js` and CommonJS `dist/server.cjs`; `npm start` runs the ESM entrypoint, and package imports select the appropriate format.
+
+- Set the project Root Directory to `server` if the monorepo root is selected.
+- `vercel.json` sets `outputDirectory` to `null` for automatic detection instead of looking for a static `public` directory. If the Dashboard still overrides this, clear the Output Directory override.
+- `postinstall` runs `prisma generate`, so the Prisma client is ready for Vercel's function bundler.
+- The pinned Prisma and esbuild dependency install scripts required for generation/build are explicitly allow-listed in `package.json`.
+- Add the same environment variables from `.env.example` in the Vercel dashboard. `.env` is not deployed.
+- `CORS_ORIGIN` must contain the deployed frontend origin, or `*` when credentials are not used.
+- `engines.node` pins Vercel to Node.js `24.x`; keep it aligned with the version used locally.
+- Prisma clients are cached on `globalThis` so warm serverless invocations reuse one connection pool.
 
 ### Required Variables
 
@@ -197,6 +212,46 @@ CLOUDINARY_FOLDER=ecommerce-products
 
 Existing image URLs continue to display while uploads are disabled.
 
+### Email delivery (Nodemailer)
+
+Forgot-password codes and the super-admin data-reset codes require SMTP. Email delivery is optional: the server starts normally when it is disabled, and the affected endpoints return `503` with a clear message.
+
+```text
+SMTP_ENABLED=false
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=
+SMTP_SECURE=false
+```
+
+Use `SMTP_PORT=465` with `SMTP_SECURE=true` for implicit TLS, or `587` with `false` for STARTTLS.
+
+## Email-Code Protected Flows
+
+### Forgot password
+
+| Method | Endpoint | Body | Result |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/auth/forgot-password/send-code` | `{ "email": "..." }` | Emails a 6-digit code when the account is eligible; the response is always generic |
+| `POST` | `/api/v1/auth/forgot-password/verify-code` | `{ "email": "...", "code": "123456" }` | Short-lived reset token |
+| `POST` | `/api/v1/auth/forgot-password/reset` | `{ "resetToken": "...", "newPassword": "..." }` or `{ "email": "...", "code": "...", "newPassword": "..." }` | Updates the password and consumes the code |
+
+Codes are stored only as bcrypt hashes, expire after 10 minutes, allow 5 incorrect attempts, and are deleted after a successful reset.
+
+### Super-admin data wipe
+
+All three endpoints require a `SUPER_ADMIN` bearer token. The service also re-checks the current account's role, status and email.
+
+| Method | Endpoint | Body | Result |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/settings/data-reset/request-code` | — | Emails a 6-digit code to the authenticated admin's email |
+| `POST` | `/api/v1/settings/data-reset/verify-code` | `{ "code": "123456" }` | Short-lived verification token that unlocks the final action |
+| `POST` | `/api/v1/settings/data-reset/execute` | `{ "verificationToken": "...", "confirmation": "DELETE ALL DATA" }` | Wipes store data in one Prisma transaction and returns deletion counts |
+
+The wipe removes catalog, orders, payments, coupons, reviews, carts, wishlists, addresses, notifications, finance records, employees and inventory logs. It preserves user accounts (so admins are never locked out), audit logs and the site settings singleton.
+
 ## Environment Validation
 
 Environment variables are validated with Zod at startup in `src/config/env.ts`.
@@ -210,7 +265,7 @@ The process exits with a clear message when:
 - `CORS_ORIGIN` is not `*` or a comma-separated list of HTTP(S) URLs
 - `BCRYPT_SALT_ROUNDS` is outside 10-15
 - The super-admin password is missing, too short, or a placeholder
-- An enabled payment provider or Cloudinary is missing required credentials
+- An enabled payment provider, Cloudinary or SMTP is missing required credentials
 - Google client ID and secret are configured without each other
 
 Payment and Cloudinary credentials are optional while their feature flags are `false`.
@@ -242,6 +297,8 @@ npm run db:seed
 - Zod request validation
 - JWT access and refresh secrets separated
 - Password hashing with bcrypt
+- Hashed, expiring, attempt-limited email verification codes for sensitive flows
+- Short-lived, purpose-scoped tokens after code verification
 - Role-based authorization for admin and super-admin routes
 - Raw Stripe webhook body handling before JSON parsing
 - Stripe webhook signature and timestamp verification

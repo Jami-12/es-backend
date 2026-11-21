@@ -50,8 +50,44 @@ const parseExpiresIn = (value: unknown): number => {
   return Math.min(parsed, 86_400);
 };
 
-const getString = (value: unknown, fallback = ""): string =>
-  typeof value === "string" ? value : fallback;
+/**
+ * bKash sandbox responses are inconsistent: some numeric fields arrive as
+ * numbers and some keys differ only by case between create/execute/query.
+ */
+const getString = (value: unknown, fallback = ""): string => {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  return fallback;
+};
+
+const readField = (data: JsonObject, keys: string[]): string => {
+  const entries = Object.entries(data);
+
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
+      const value = getString(data[key]);
+      if (value) return value;
+    }
+
+    const match = entries.find(
+      ([entryKey]) => entryKey.toLowerCase() === key.toLowerCase(),
+    );
+    if (match) {
+      const value = getString(match[1]);
+      if (value) return value;
+    }
+  }
+
+  return "";
+};
+
+const normaliseStatusCode = (value: string): string =>
+  value === "0" ? "0000" : value;
+
+/** Sandbox execute can land a fraction of a second before query reflects it. */
+const waitForSettlement = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 700));
 
 const toJson = (value: unknown): Prisma.InputJsonValue =>
   JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -268,16 +304,27 @@ export const executeBkashPayment = async (
   return gateway.data;
 };
 
-const isCompleted = (data: JsonObject): boolean =>
-  getString(data.statusCode) === "0000" &&
-  getString(data.transactionStatus).toLowerCase() === "completed";
+const COMPLETED_STATUSES = new Set(["completed", "success", "successful", "paid"]);
+
+const isCompleted = (data: JsonObject): boolean => {
+  const statusCode = normaliseStatusCode(readField(data, ["statusCode"]));
+  const status = readField(data, ["transactionStatus", "status"]).toLowerCase();
+  const trxId = readField(data, ["trxID", "trxId"]);
+
+  // A 0000 response with a transaction id but no explicit status is how the
+  // sandbox execute endpoint often confirms a successful final step.
+  return (
+    statusCode === "0000" &&
+    (COMPLETED_STATUSES.has(status) || (!status && Boolean(trxId)))
+  );
+};
 
 const assertBkashPaymentMatches = (
   data: JsonObject,
   payment: PaymentVerificationContext,
 ): void => {
   const completed = isCompleted(data);
-  const amountText = getString(data.amount);
+  const amountText = readField(data, ["amount"]);
 
   if (amountText) {
     const amount = Number(amountText);
@@ -298,7 +345,7 @@ const assertBkashPaymentMatches = (
     );
   }
 
-  const currency = getString(data.currency).toUpperCase();
+  const currency = readField(data, ["currency"]).toUpperCase();
 
   if (currency) {
     if (currency !== "BDT") {
@@ -312,19 +359,18 @@ const assertBkashPaymentMatches = (
     );
   }
 
-  const invoice = getString(data.merchantInvoiceNumber);
+  const invoice = readField(data, ["merchantInvoiceNumber"]);
+  const returnedPaymentId = readField(data, ["paymentID", "paymentId"]);
+  const invoiceMatches = Boolean(invoice && invoice === payment.orderNumber);
+  const paymentIdMatches = Boolean(
+    returnedPaymentId &&
+      payment.providerPaymentId &&
+      returnedPaymentId === payment.providerPaymentId,
+  );
 
-  if (invoice && invoice !== payment.orderNumber) {
+  if (invoice && !invoiceMatches) {
     throw ApiError.badRequest("bKash payment does not belong to this order");
   }
-
-  if (completed && invoice !== payment.orderNumber) {
-    throw ApiError.badRequest(
-      "bKash completed payment is missing a matching invoice number",
-    );
-  }
-
-  const returnedPaymentId = getString(data.paymentID);
 
   if (
     returnedPaymentId &&
@@ -336,24 +382,25 @@ const assertBkashPaymentMatches = (
     );
   }
 
-  if (
-    completed &&
-    (!returnedPaymentId || returnedPaymentId !== payment.providerPaymentId)
-  ) {
+  // Do not require both identifiers: query responses may omit the invoice or
+  // the paymentID depending on the bKash API version. One matching identifier
+  // is enough when the amount and currency already passed validation.
+  if (completed && !invoiceMatches && !paymentIdMatches) {
     throw ApiError.badRequest(
-      "bKash completed payment is missing a matching paymentID",
+      "bKash completed payment is missing a matching order reference",
     );
   }
 };
 
 const buildVerification = (data: JsonObject): ProviderVerificationResult => {
-  const statusCode = getString(data.statusCode);
-  const transactionStatus = getString(data.transactionStatus);
+  const statusCode = normaliseStatusCode(readField(data, ["statusCode"]));
+  const transactionStatus = readField(data, ["transactionStatus", "status"]);
   const normalizedStatus = transactionStatus.toLowerCase();
-  const paymentId = getString(data.paymentID);
-  const trxId = getString(data.trxID);
+  const paymentId = readField(data, ["paymentID", "paymentId"]);
+  const trxId = readField(data, ["trxID", "trxId"]);
+  const message = readField(data, ["statusMessage", "resultMessage", "errorMessage"]);
 
-  if (statusCode === "0000" && normalizedStatus === "completed") {
+  if (isCompleted(data)) {
     return {
       status: "PAID",
       transactionId: trxId || paymentId,
@@ -364,8 +411,7 @@ const buildVerification = (data: JsonObject): ProviderVerificationResult => {
     };
   }
 
-  const failureText =
-    `${transactionStatus} ${getString(data.statusMessage)}`.toLowerCase();
+  const failureText = `${transactionStatus} ${message}`.toLowerCase();
   const cancelled =
     failureText.includes("cancel") || failureText.includes("abort");
 
@@ -374,7 +420,7 @@ const buildVerification = (data: JsonObject): ProviderVerificationResult => {
       status: "CANCELLED",
       providerPaymentId: paymentId || undefined,
       providerResponse: toJson(data),
-      rawStatus: transactionStatus || getString(data.statusMessage),
+      rawStatus: transactionStatus || message || statusCode,
     };
   }
 
@@ -392,32 +438,23 @@ const buildVerification = (data: JsonObject): ProviderVerificationResult => {
     "insufficient",
   ].some((keyword) => failureText.includes(keyword));
 
-  if (failed) {
+  if (failed || statusCode !== "0000") {
     return {
       status: "FAILED",
       providerPaymentId: paymentId || undefined,
       providerResponse: toJson(data),
-      rawStatus: transactionStatus || getString(data.statusMessage),
+      rawStatus: transactionStatus || message || statusCode || "Provider rejected the payment",
     };
   }
 
   // bKash uses 0000 for every successfully processed query, including a
   // payment that is still initiated. Anything else is an authoritative
   // failure; an unknown 0000 state must not be reported as paid.
-  if (statusCode === "0000") {
-    return {
-      status: "PENDING",
-      providerPaymentId: paymentId || undefined,
-      providerResponse: toJson(data),
-      rawStatus: transactionStatus || statusCode,
-    };
-  }
-
   return {
-    status: "FAILED",
+    status: "PENDING",
     providerPaymentId: paymentId || undefined,
     providerResponse: toJson(data),
-    rawStatus: transactionStatus || getString(data.statusMessage),
+    rawStatus: transactionStatus || statusCode,
   };
 };
 
@@ -429,6 +466,15 @@ export const bkashProvider: PaymentProvider = {
   async initiate(order): Promise<PaymentInitiationResult> {
     if (!bkashConfig.callbackUrl) {
       throw new ApiError(503, "BKASH_CALLBACK_URL is not configured");
+    }
+
+    if (
+      !bkashConfig.callbackUrl.includes("/api/v1/payments/bkash/callback")
+    ) {
+      throw new ApiError(
+        503,
+        "BKASH_CALLBACK_URL must point to /api/v1/payments/bkash/callback",
+      );
     }
 
     const callbackUrl = appendQuery(bkashConfig.callbackUrl, {
@@ -493,7 +539,8 @@ export const bkashProvider: PaymentProvider = {
     payment: PaymentVerificationContext,
     callbackData,
   ): Promise<ProviderVerificationResult> {
-    const callbackPaymentId = callbackData.paymentID?.trim();
+    const callback = (callbackData ?? {}) as JsonObject;
+    const callbackPaymentId = readField(callback, ["paymentID", "paymentId"]);
 
     if (
       payment.providerPaymentId &&
@@ -513,7 +560,7 @@ export const bkashProvider: PaymentProvider = {
       );
     }
 
-    const callbackStatus = callbackData.status?.toLowerCase() ?? "";
+    const callbackStatus = readField(callback, ["status", "result"]).toLowerCase();
 
     if (callbackStatus === "success" || callbackStatus === "completed") {
       let executed: JsonObject | null = null;
@@ -525,9 +572,13 @@ export const bkashProvider: PaymentProvider = {
           throw error;
         }
 
-        // Execution may fail because the payment was already executed, or
-        // because bKash returned an unreadable body. The query endpoint is the
-        // authoritative fallback and must still be checked.
+        // Execution can fail because bKash already executed the payment or
+        // because the execute response was unreadable. Never report a gateway
+        // failure before the authoritative query endpoint has been checked.
+        console.warn("[bkash] execute failed; querying authoritative status", {
+          message: error.message,
+          statusCode: error.statusCode,
+        });
       }
 
       if (executed && isCompleted(executed)) {
@@ -535,9 +586,20 @@ export const bkashProvider: PaymentProvider = {
         return buildVerification(executed);
       }
 
-      const queried = await queryBkashPayment(paymentId);
+      let queried = await queryBkashPayment(paymentId);
       assertBkashPaymentMatches(queried, payment);
-      return buildVerification(queried);
+      let verification = buildVerification(queried);
+
+      // A successful redirect can reach us slightly before bKash settles the
+      // query record. One bounded retry prevents a false "still processing".
+      if (verification.status === "PENDING") {
+        await waitForSettlement();
+        queried = await queryBkashPayment(paymentId);
+        assertBkashPaymentMatches(queried, payment);
+        verification = buildVerification(queried);
+      }
+
+      return verification;
     }
 
     // Never trust a `status=cancel` query parameter on its own: callbacks are

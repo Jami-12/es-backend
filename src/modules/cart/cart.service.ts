@@ -47,6 +47,8 @@ const toCartResponse = (cart: CartRecord): CartResponse => {
     return {
       id: item.id,
       productId: item.productId,
+      selectedSize: item.selectedSize || null,
+      selectedColor: item.selectedColor || null,
       quantity: item.quantity,
       unitPrice,
       originalPrice: pricing.originalPrice.toNumber(),
@@ -151,13 +153,17 @@ export const addCartItem = async (
     select: { id: true },
   });
 
+  const selectedSize = input.selectedSize?.trim() ?? "";
+  const selectedColor = input.selectedColor?.trim() ?? "";
+  const variantKey = {
+    cartId: cart.id,
+    productId: product.id,
+    selectedSize,
+    selectedColor,
+  };
+
   const existingItem = await prisma.cartItem.findUnique({
-    where: {
-      cartId_productId: {
-        cartId: cart.id,
-        productId: product.id,
-      },
-    },
+    where: { cartId_productId_selectedSize_selectedColor: variantKey },
     select: { id: true, quantity: true },
   });
 
@@ -170,15 +176,9 @@ export const addCartItem = async (
   }
 
   await prisma.cartItem.upsert({
-    where: {
-      cartId_productId: {
-        cartId: cart.id,
-        productId: product.id,
-      },
-    },
+    where: { cartId_productId_selectedSize_selectedColor: variantKey },
     create: {
-      cartId: cart.id,
-      productId: product.id,
+      ...variantKey,
       quantity: input.quantity,
     },
     update: {

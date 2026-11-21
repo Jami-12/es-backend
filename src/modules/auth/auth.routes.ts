@@ -7,6 +7,9 @@ import {
   loginSchema,
   refreshTokenSchema,
   registerSchema,
+  resetPasswordSchema,
+  sendPasswordResetCodeSchema,
+  verifyPasswordResetCodeSchema,
 } from "../../validations/auth.validation";
 import * as authController from "./auth.controller";
 
@@ -31,6 +34,27 @@ router.post(
   authRateLimiter,
   validate({ body: refreshTokenSchema }),
   authController.refresh,
+);
+
+router.post(
+  "/forgot-password/send-code",
+  authRateLimiter,
+  validate({ body: sendPasswordResetCodeSchema }),
+  authController.sendPasswordResetCode,
+);
+
+router.post(
+  "/forgot-password/verify-code",
+  authRateLimiter,
+  validate({ body: verifyPasswordResetCodeSchema }),
+  authController.verifyPasswordResetCode,
+);
+
+router.post(
+  "/forgot-password/reset",
+  authRateLimiter,
+  validate({ body: resetPasswordSchema }),
+  authController.resetPassword,
 );
 
 router.get("/me", authenticate, authController.me);

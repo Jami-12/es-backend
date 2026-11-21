@@ -1,10 +1,15 @@
+import { env } from "../../../config/env";
 import { ApiError } from "../../../utils/ApiError";
 import { redactText } from "../../../utils/redact";
 
 type JsonObject = Record<string, unknown>;
 
-/** Payment gateways must answer quickly; hanging sockets must never stall a request. */
-export const DEFAULT_GATEWAY_TIMEOUT_MS = 15_000;
+/**
+ * Payment gateways must answer quickly; hanging sockets must never stall a
+ * request. Sandbox endpoints are deliberately given a tighter deadline so a
+ * slow sandbox never keeps checkout loading for 15+ seconds.
+ */
+export const DEFAULT_GATEWAY_TIMEOUT_MS = env.isProduction ? 12_000 : 8_000;
 
 export type GatewayBodyKind =
   | "empty"
@@ -65,10 +70,22 @@ export const gatewayFetch = async (
 
   const controller = new AbortController();
   let timedOut = false;
+  let rejectOnTimeout: ((error: ApiError) => void) | undefined;
+
+  const timeoutError = (): ApiError =>
+    new ApiError(
+      504,
+      `${provider} did not respond in time while ${operation}. Please try again.`,
+    );
+
+  const deadline = new Promise<never>((_resolve, reject) => {
+    rejectOnTimeout = reject;
+  });
 
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
+    rejectOnTimeout?.(timeoutError());
   }, timeoutMs);
 
   const abortFromCaller = (): void => controller.abort();
@@ -82,7 +99,24 @@ export const gatewayFetch = async (
   }
 
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await Promise.race([
+      fetch(url, { ...init, signal: controller.signal }),
+      deadline,
+    ]);
+
+    // Read the body inside the same deadline. Returning the original Response
+    // would clear the timer before `response.text()` runs, allowing a stalled
+    // body stream to hang the request.
+    const body = await Promise.race([
+      response.text(),
+      deadline.then(() => ""),
+    ]);
+
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } catch (error) {
     // Only log the error class/name. Provider request URLs and headers can
     // contain identifiers, and error messages can contain fragments of both.
@@ -94,11 +128,8 @@ export const gatewayFetch = async (
       abortedByCaller: Boolean(callerSignal?.aborted),
     });
 
-    if (timedOut) {
-      throw new ApiError(
-        504,
-        `${provider} did not respond in time while ${operation}. Please try again.`,
-      );
+    if (timedOut || error instanceof ApiError) {
+      throw error instanceof ApiError ? error : timeoutError();
     }
 
     throw new ApiError(

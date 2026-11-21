@@ -31,8 +31,12 @@ const corsOptions: CorsOptions = {
 
 app.disable("x-powered-by");
 
-if (env.TRUST_PROXY > 0) {
-  app.set("trust proxy", env.TRUST_PROXY);
+// Vercel terminates TLS at the edge; trusting one hop keeps req.ip (and
+// therefore rate limiting and audit logs) based on the real client address.
+const trustProxy = env.VERCEL ? 1 : env.TRUST_PROXY;
+
+if (trustProxy > 0) {
+  app.set("trust proxy", trustProxy);
 }
 
 app.use(helmet());
@@ -69,6 +73,7 @@ app.use(globalRateLimiter);
 app.get("/", (_req, res) => {
   sendSuccess(res, {
     data: {
+      status: "ok",
       name: "3D E-Commerce API",
       version: "1.0.0",
       environment: env.NODE_ENV,
@@ -83,6 +88,8 @@ app.get("/", (_req, res) => {
         wishlist: "/api/v1/wishlist",
         addresses: "/api/v1/addresses",
         orders: "/api/v1/orders",
+        orderTracking: "/api/v1/orders/track?code=:code",
+        notes: "/api/v1/notes",
         payments: "/api/v1/payments",
         coupons: "/api/v1/coupons",
         reviews: "/api/v1/reviews",
@@ -139,3 +146,4 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 export { app };
+export default app;

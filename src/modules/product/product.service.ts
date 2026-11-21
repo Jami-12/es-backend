@@ -22,6 +22,7 @@ import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   CreateProductInput,
   PaginatedProducts,
+  ProductColorOption,
   ProductImageInput,
   ProductListQuery,
   ProductResponse,
@@ -31,6 +32,53 @@ import type {
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+/** Normalises variants to plain JSON so Prisma can store them portably. */
+const normalizeVariants = (
+  sizes?: string[],
+  colors?: ProductColorOption[],
+): { sizes: string[]; colors: ProductColorOption[] } => ({
+  sizes: Array.from(
+    new Set((sizes ?? []).map((size) => size.trim()).filter(Boolean)),
+  ).slice(0, 30),
+  colors: Array.from(
+    new Map(
+      (colors ?? [])
+        .map((color) => ({
+          name: color.name.trim(),
+          hex: color.hex.trim().toLowerCase(),
+        }))
+        .filter(
+          (color) => color.name.length > 0 && HEX_COLOR_PATTERN.test(color.hex),
+        )
+        .map((color) => [`${color.name}|${color.hex}`, color] as const),
+    ).values(),
+  ).slice(0, 30),
+});
+
+const readSizes = (value: Prisma.JsonValue): string[] =>
+  Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+
+const readColors = (value: Prisma.JsonValue): ProductColorOption[] => {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((item): ProductColorOption[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const candidate = item as Record<string, unknown>;
+    if (
+      typeof candidate.name !== "string" ||
+      typeof candidate.hex !== "string" ||
+      !HEX_COLOR_PATTERN.test(candidate.hex)
+    ) {
+      return [];
+    }
+    return [{ name: candidate.name, hex: candidate.hex }];
+  });
+};
 
 const productInclude = {
   category: {
@@ -193,6 +241,8 @@ const toProductResponse = (
     })),
     thumbnail,
     modelUrl: product.modelUrl,
+    sizes: readSizes(product.sizes),
+    colors: readColors(product.colors),
     positionX: product.positionX,
     positionY: product.positionY,
     positionZ: product.positionZ,
@@ -356,6 +406,7 @@ export const createProduct = async (
     ? buildProductImages(input.images, input.thumbnail)
     : [];
   const status = input.status ?? ProductStatus.ACTIVE;
+  const variants = normalizeVariants(input.sizes, input.colors);
 
   if (images.length === 0 && status !== ProductStatus.DRAFT) {
     throw ApiError.badRequest(
@@ -389,6 +440,8 @@ export const createProduct = async (
       category: { connect: { id: input.categoryId } },
       brand: brandId ? { connect: { id: brandId } } : undefined,
       modelUrl: input.modelUrl?.trim() || null,
+      sizes: variants.sizes as Prisma.InputJsonValue,
+      colors: variants.colors as unknown as Prisma.InputJsonValue,
       positionX: input.positionX ?? 0,
       positionY: input.positionY ?? 0,
       positionZ: input.positionZ ?? 0,
@@ -679,6 +732,17 @@ export const updateProduct = async (
 
   if (input.modelUrl !== undefined) {
     data.modelUrl = input.modelUrl?.trim() || null;
+  }
+
+  if (input.sizes !== undefined || input.colors !== undefined) {
+    const variants = normalizeVariants(input.sizes, input.colors);
+
+    if (input.sizes !== undefined) {
+      data.sizes = variants.sizes as Prisma.InputJsonValue;
+    }
+    if (input.colors !== undefined) {
+      data.colors = variants.colors as unknown as Prisma.InputJsonValue;
+    }
   }
 
   if (input.positionX !== undefined) data.positionX = input.positionX;

@@ -1,5 +1,6 @@
-import { Prisma, type Notification } from "@prisma/client";
+import { NotificationType, Prisma, Role, type Notification } from "@prisma/client";
 import { prisma } from "../../config/prisma";
+import { ORDER_PLACED_EVENT } from "./notification-events";
 import { ApiError } from "../../utils/ApiError";
 import { buildPaginationMeta } from "../../utils/pagination";
 import type {
@@ -13,6 +14,8 @@ const toNotificationResponse = (
 ): NotificationResponse => ({
   id: notification.id,
   userId: notification.userId,
+  orderId: notification.orderId,
+  eventType: notification.eventType,
   title: notification.title,
   message: notification.message,
   type: notification.type,
@@ -20,20 +23,42 @@ const toNotificationResponse = (
   createdAt: notification.createdAt.toISOString(),
 });
 
+// The notification centre is order-only. Shop admins see only brand-new
+// incoming orders; customers still see every update about their own orders.
+const ORDER_NOTIFICATION_WHERE: Prisma.NotificationWhereInput = {
+  type: NotificationType.ORDER,
+};
+
+const feedWhere = (
+  userId: string,
+  role: Role,
+): Prisma.NotificationWhereInput => ({
+  ...ORDER_NOTIFICATION_WHERE,
+  userId,
+  ...(role === Role.ADMIN || role === Role.SUPER_ADMIN
+    ? { eventType: ORDER_PLACED_EVENT }
+    : {}),
+});
+
 export const listNotifications = async (
   userId: string,
+  role: Role,
   query: NotificationListQuery,
 ): Promise<PaginatedNotifications> => {
-  const where: Prisma.NotificationWhereInput = { userId };
-
-  if (typeof query.isRead === "boolean") {
-    where.isRead = query.isRead;
+  if (query.type && query.type !== NotificationType.ORDER) {
+    // Non-order types are never returned by this endpoint.
+    return {
+      items: [],
+      meta: buildPaginationMeta(query.page, query.limit, 0),
+      unreadCount: 0,
+    };
   }
 
-  if (query.type) {
-    where.type = query.type;
-  }
-
+  const where = feedWhere(userId, role);
+  const unreadWhere: Prisma.NotificationWhereInput = {
+    ...where,
+    isRead: false,
+  };
   const skip = (query.page - 1) * query.limit;
 
   const [notifications, total, unreadCount] = await prisma.$transaction([
@@ -44,7 +69,7 @@ export const listNotifications = async (
       take: query.limit,
     }),
     prisma.notification.count({ where }),
-    prisma.notification.count({ where: { userId, isRead: false } }),
+    prisma.notification.count({ where: unreadWhere }),
   ]);
 
   return {
@@ -62,7 +87,11 @@ export const markNotificationRead = async (
     where: { id: notificationId },
   });
 
-  if (!notification || notification.userId !== userId) {
+  if (
+    !notification ||
+    notification.userId !== userId ||
+    notification.type !== NotificationType.ORDER
+  ) {
     throw ApiError.notFound("Notification not found");
   }
 
@@ -80,9 +109,10 @@ export const markNotificationRead = async (
 
 export const markAllNotificationsRead = async (
   userId: string,
+  role: Role,
 ): Promise<{ updatedCount: number }> => {
   const result = await prisma.notification.updateMany({
-    where: { userId, isRead: false },
+    where: { ...feedWhere(userId, role), isRead: false },
     data: { isRead: true },
   });
 
@@ -95,10 +125,14 @@ export const deleteNotification = async (
 ): Promise<void> => {
   const notification = await prisma.notification.findUnique({
     where: { id: notificationId },
-    select: { id: true, userId: true },
+    select: { id: true, userId: true, type: true },
   });
 
-  if (!notification || notification.userId !== userId) {
+  if (
+    !notification ||
+    notification.userId !== userId ||
+    notification.type !== NotificationType.ORDER
+  ) {
     throw ApiError.notFound("Notification not found");
   }
 

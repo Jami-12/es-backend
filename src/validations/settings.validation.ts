@@ -40,6 +40,11 @@ const nullableLogoUrlSchema = z.preprocess((value) => {
   return emptyToUndefined(value);
 }, assetUrlSchema.nullable().optional());
 
+const verificationCodeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{6}$/, "Verification code must be exactly 6 digits");
+
 export const updateSettingsSchema = z
   .object({
     siteName: nullableTextSchema(120, "Site name"),
@@ -61,3 +66,22 @@ export const updateSettingsSchema = z
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one setting must be provided for update",
   });
+
+export const verifyDataResetCodeSchema = z.object({
+  code: verificationCodeSchema,
+});
+
+export const DATA_RESET_CONFIRMATION = "DELETE ALL DATA";
+
+export const executeDataResetSchema = z.object({
+  verificationToken: z
+    .string()
+    .trim()
+    .min(1, "Verification token is required"),
+  confirmation: z
+    .string()
+    .refine(
+      (value) => value === DATA_RESET_CONFIRMATION,
+      `Type "${DATA_RESET_CONFIRMATION}" exactly to confirm the data wipe`,
+    ),
+});

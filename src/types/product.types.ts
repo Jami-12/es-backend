@@ -26,6 +26,11 @@ export interface ReorderProductImagesInput {
   imageIds: string[];
 }
 
+export interface ProductColorOption {
+  name: string;
+  hex: string;
+}
+
 export interface CreateProductInput {
   title: string;
   slug?: string;
@@ -44,6 +49,8 @@ export interface CreateProductInput {
   brandId?: string | null;
   brandName?: string | null;
   modelUrl?: string | null;
+  sizes?: string[];
+  colors?: ProductColorOption[];
   positionX?: number;
   positionY?: number;
   positionZ?: number;
@@ -149,6 +156,8 @@ export interface ProductResponse {
   images: ProductImageResponse[];
   thumbnail: string | null;
   modelUrl: string | null;
+  sizes: string[];
+  colors: ProductColorOption[];
   positionX: number;
   positionY: number;
   positionZ: number;

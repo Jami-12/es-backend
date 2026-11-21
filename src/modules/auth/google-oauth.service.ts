@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import jwt from "jsonwebtoken";
 import { env } from "../../config/env";
 import { ApiError } from "../../utils/ApiError";
+import jwt from "../../utils/jsonwebtoken";
 import type { GoogleProfile } from "./auth.service";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";

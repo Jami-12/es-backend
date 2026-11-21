@@ -73,14 +73,21 @@ const startServer = async (): Promise<void> => {
   });
 };
 
-startServer().catch(async (error: unknown) => {
-  console.error("[server] Failed to start:", redactValue(error));
+// The serverless handler imports app.ts directly; only this standalone entry
+// starts a listener.
+if (!env.VERCEL) {
+  startServer().catch(async (error: unknown) => {
+    console.error("[server] Failed to start:", redactValue(error));
 
-  try {
-    await disconnectDatabase();
-  } catch {
-    // Ignore disconnect failures during startup failure.
-  }
+    try {
+      await disconnectDatabase();
+    } catch {
+      // Ignore disconnect failures during startup failure.
+    }
 
-  process.exit(1);
-});
+    process.exit(1);
+  });
+}
+
+export { app };
+export default app;

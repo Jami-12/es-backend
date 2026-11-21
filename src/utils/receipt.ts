@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { PaymentMethod } from "@prisma/client";
 import { env } from "../config/env";
+import { getReceiptSettings } from "../modules/settings/receipt-settings.service";
 import type { OrderResponse, ReceiptData } from "../types/order.types";
 
 const TRANSACTION_PREFIXES: Record<PaymentMethod, string> = {
@@ -21,23 +22,41 @@ export const buildReceiptUrl = (orderId: string): string => {
   return baseUrl ? `${baseUrl}${path}` : path;
 };
 
-export const buildReceipt = (order: OrderResponse): ReceiptData => {
+export const buildReceipt = async (order: OrderResponse): Promise<ReceiptData> => {
+  // Settings are read at receipt time so saved branding/toggles apply
+  // immediately to both live views and freshly generated PDFs/prints.
+  const settings = await getReceiptSettings();
+
   return {
     receiptNumber: order.receiptNumber ?? order.orderNumber,
     orderNumber: order.orderNumber,
     issuedAt: order.createdAt,
     store: {
-      name: env.STORE_NAME,
-      address: env.STORE_ADDRESS,
-      phone: env.STORE_PHONE,
-      email: env.STORE_EMAIL,
+      name: settings.storeName,
+      tagline: settings.tagline,
+      logoUrl: settings.showLogo ? settings.logoUrl : null,
+      footerNote: settings.footerNote ?? "Thank you for shopping with us.",
+      address: settings.contactAddress ?? env.STORE_ADDRESS,
+      phone: settings.contactPhone ?? env.STORE_PHONE,
+      email: settings.contactEmail ?? env.STORE_EMAIL,
       currency: env.STORE_CURRENCY,
+    },
+    display: {
+      showLogo: settings.showLogo,
+      showSize: settings.showSize,
+      showColor: settings.showColor,
+      showPaymentMethod: settings.showPaymentMethod,
+      showTransactionId: settings.showTransactionId,
+      showCustomer: settings.showCustomer,
+      showShippingAddress: settings.showShippingAddress,
     },
     customer: order.customer,
     shippingAddress: order.address,
     items: order.items.map((item) => ({
       productName: item.productName,
       productImage: item.productImage,
+      size: item.size,
+      color: item.color,
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       totalPrice: item.totalPrice,

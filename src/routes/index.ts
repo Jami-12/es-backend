@@ -12,6 +12,7 @@ import { cartRoutes } from "../modules/cart/cart.routes";
 import { wishlistRoutes } from "../modules/wishlist/wishlist.routes";
 import { addressRoutes } from "../modules/address/address.routes";
 import { orderRoutes } from "../modules/order/order.routes";
+import { publicOrderRoutes } from "../modules/order/public-order.routes";
 import { paymentRoutes } from "../modules/payment/payment.routes";
 import { couponRoutes } from "../modules/coupon/coupon.routes";
 import {
@@ -19,6 +20,7 @@ import {
   reviewRoutes,
 } from "../modules/review/review.routes";
 import { notificationRoutes } from "../modules/notification/notification.routes";
+import { noteRoutes } from "../modules/note/note.routes";
 import { adminRoutes } from "../modules/admin/admin.routes";
 import { analyticsRoutes } from "../modules/analytics/analytics.routes";
 import { auditRoutes } from "../modules/audit/audit.routes";
@@ -51,6 +53,8 @@ router.get("/", (_req, res) => {
         wishlist: "/api/v1/wishlist",
         addresses: "/api/v1/addresses",
         orders: "/api/v1/orders",
+        orderTracking: "/api/v1/orders/track?code=:code",
+        notes: "/api/v1/notes",
         payments: "/api/v1/payments",
         coupons: "/api/v1/coupons",
         reviews: "/api/v1/reviews",
@@ -96,11 +100,14 @@ router.use("/uploads", uploadRoutes);
 router.use("/cart", cartRoutes);
 router.use("/wishlist", wishlistRoutes);
 router.use("/addresses", addressRoutes);
+// Public tracking must be registered before the authenticated order router.
+router.use("/orders", publicOrderRoutes);
 router.use("/orders", orderRoutes);
 router.use("/payments", paymentRoutes);
 router.use("/coupons", couponRoutes);
 router.use("/reviews", reviewRoutes);
 router.use("/notifications", notificationRoutes);
+router.use("/notes", noteRoutes);
 router.use("/analytics", analyticsRoutes);
 router.use("/audit", auditRoutes);
 router.use("/expenses", expenseRoutes);

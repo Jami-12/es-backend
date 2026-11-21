@@ -54,3 +54,32 @@ export const changePasswordSchema = z.object({
     .optional(),
   newPassword: passwordSchema,
 });
+
+const verificationCodeSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{6}$/, "Verification code must be exactly 6 digits");
+
+export const sendPasswordResetCodeSchema = z.object({
+  email: emailSchema,
+});
+
+export const verifyPasswordResetCodeSchema = z.object({
+  email: emailSchema,
+  code: verificationCodeSchema,
+});
+
+export const resetPasswordSchema = z
+  .object({
+    resetToken: z.string().trim().min(1, "Reset token cannot be empty").optional(),
+    email: emailSchema.optional(),
+    code: verificationCodeSchema.optional(),
+    newPassword: passwordSchema,
+  })
+  .refine(
+    (value) => Boolean(value.resetToken) || Boolean(value.email && value.code),
+    {
+      message: "Provide either a reset token or an email and verification code",
+      path: ["resetToken"],
+    },
+  );

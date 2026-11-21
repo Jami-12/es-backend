@@ -46,7 +46,7 @@ type PaymentRecord = Prisma.PaymentGetPayload<{
  * provider reference before another request is allowed to reclaim it. This
  * prevents a crashed request from permanently blocking the order.
  */
-const INITIATION_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
+const INITIATION_CLAIM_TIMEOUT_MS = 30 * 1000;
 
 interface PaymentClaimSnapshot {
   status: PaymentStatus;
@@ -610,8 +610,9 @@ export const initiatePayment = async (
         customerId: order.userId,
         title: "Payment processing",
         message: `Payment for order ${order.orderNumber} is being processed.`,
-        type: "PAYMENT",
+        type: "ORDER",
         adminMessage: `Payment for order ${order.orderNumber} is processing with ${order.paymentMethod}.`,
+        orderId: order.id,
       });
     }
   });
@@ -736,8 +737,9 @@ const markPaymentCancelled = async (
       customerId: order.userId,
       title: "Payment cancelled",
       message: `Payment for order ${order.orderNumber} was cancelled. You can retry payment from your order.`,
-      type: "PAYMENT",
+      type: "ORDER",
       adminMessage: `Payment for order ${order.orderNumber} was cancelled.`,
+      orderId,
     });
   });
 };
@@ -1059,10 +1061,11 @@ export const handleCardWebhook = async (
         message: `Card payment for order ${order.orderNumber} ${
           nextStatus === PaymentStatus.CANCELLED ? "was cancelled" : "failed"
         }: ${reason}`,
-        type: "PAYMENT",
+        type: "ORDER",
         adminMessage: `Card payment for order ${order.orderNumber} ${
           nextStatus === PaymentStatus.CANCELLED ? "was cancelled" : "failed"
         }: ${reason}`,
+        orderId,
       });
     });
 
