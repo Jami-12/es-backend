@@ -13,7 +13,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup",
+    "build": "tsup && node scripts/verify-build.mjs",
     "start": "node dist/server.js",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test --experimental-test-module-mocks tests/gateway-response.test.ts tests/bkash.test.ts tests/nagad.test.ts tests/stripe.test.ts tests/payment-service.test.ts tests/order-checkout-and-bkash-create.test.ts",

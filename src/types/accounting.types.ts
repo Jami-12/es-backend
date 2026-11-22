@@ -16,7 +16,12 @@ export interface FinancialSummary {
   currency: string;
   period: AccountingPeriod;
   revenue: {
+    /** Cash collected from ledger income entries, including shipping. */
     sales: number;
+    /** Product sales only (product subtotal minus discounts); excludes shipping. */
+    productSales: number;
+    /** Shipping charged separately; never part of product revenue. */
+    shipping: number;
     refunds: number;
     net: number;
   };

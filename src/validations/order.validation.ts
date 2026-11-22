@@ -64,6 +64,17 @@ export const collectCodPaymentSchema = z.object({
   reference: z.string().trim().max(120, "Reference is too long").nullable().optional(),
 });
 
+/** Cash collection covers every order, regardless of payment method. */
+export const cashCollectionListQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  status: z.preprocess(
+    emptyToUndefined,
+    z.enum(["PENDING", "COLLECTED", "CANCELLED"]).optional(),
+  ),
+  search: z.preprocess(emptyToUndefined, z.string().trim().max(100).optional()),
+});
+
 /**
  * Public tracking accepts an order number, receipt number or order id. Only a
  * bounded, PII-free projection of the order is ever returned.

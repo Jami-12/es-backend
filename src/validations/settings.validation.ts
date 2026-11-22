@@ -58,6 +58,10 @@ export const updateSettingsSchema = z
     showBrands: booleanishSchema.optional(),
     showPromoBanners: booleanishSchema.optional(),
     showNewsletter: booleanishSchema.optional(),
+    codEnabled: booleanishSchema.optional(),
+    bkashEnabled: booleanishSchema.optional(),
+    nagadEnabled: booleanishSchema.optional(),
+    stripeEnabled: booleanishSchema.optional(),
     categorySections: z.preprocess(
       parseCategorySections,
       z.array(categorySectionSchema).optional(),

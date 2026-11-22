@@ -1,4 +1,8 @@
-import app from "../src/app";
+// Vercel compiles this TypeScript shim to api/index.js and keeps the explicit
+// `.js` specifier below. The actual handler is the tsup bundle produced by
+// `npm run build`; all of its internal `src/` imports are already bundled in.
+// @ts-ignore - dist/api/index.js is generated at build time
+import app from "../dist/api/index.js";
 
 /**
  * Vercel serverless entrypoint.

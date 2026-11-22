@@ -2,7 +2,8 @@ import { Prisma, type Coupon } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { ApiError } from "../../utils/ApiError";
 import { recordAudit } from "../../utils/audit";
-import { effectivePrice, roundMoney, toDecimal } from "../../utils/money";
+import { roundMoney, toDecimal } from "../../utils/money";
+import { resolveProductPricing } from "../../utils/productPricing";
 import type {
   CouponListQuery,
   CouponResponse,
@@ -426,7 +427,10 @@ export const validateCouponForUser = async (
         items: {
           include: {
             product: {
-              select: { price: true, discountPrice: true },
+              select: {
+                price: true,
+                discount: true,
+              },
             },
           },
         },
@@ -439,12 +443,14 @@ export const validateCouponForUser = async (
       );
     }
 
+    // Use the exact same pricing helper as the cart and checkout so coupon
+    // minimums and discounts are checked against the real product subtotal.
     subtotal = roundMoney(
       cart.items.reduce((sum, item) => {
-        const unitPrice = effectivePrice(
+        const unitPrice = resolveProductPricing(
           item.product.price,
-          item.product.discountPrice,
-        ).toNumber();
+          item.product.discount,
+        ).finalPrice.toNumber();
         return sum + unitPrice * item.quantity;
       }, 0),
     );

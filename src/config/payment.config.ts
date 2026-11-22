@@ -1,4 +1,9 @@
 import { env } from "./env";
+import {
+  getBkashCallbackConfigError,
+  getNagadCallbackUrl,
+  resolveBkashCallbackUrl,
+} from "./origins";
 
 const clean = (value: string | undefined): string | undefined => {
   const trimmed = value?.trim();
@@ -35,6 +40,16 @@ const sandboxBkashBaseUrl = "https://tokenized.sandbox.bka.sh/v1.2.0-beta";
 const sandboxNagadBaseUrl =
   "http://sandbox.mynagad.com:10080/remote-payment-gateway-1.0/api/dfs";
 
+// Startup log only. Per-request callback values are resolved lazily by
+// origins.ts so Vercel deployments can use their active HTTPS origin.
+const startupBkashCallback = resolveBkashCallbackUrl();
+console.info(
+  `[config] bKash merchant callback (env/default): ${startupBkashCallback.url ?? startupBkashCallback.error ?? "unresolved"}`,
+);
+
+/** Startup-time validation error, kept for providers that fail fast locally. */
+export const bkashCallbackConfigError = getBkashCallbackConfigError();
+
 export const bkashConfig = {
   enabled: env.BKASH_ENABLED,
   baseUrl:
@@ -44,8 +59,11 @@ export const bkashConfig = {
   appSecret: clean(env.BKASH_APP_SECRET),
   username: clean(env.BKASH_USERNAME),
   password: clean(env.BKASH_PASSWORD),
-  callbackUrl: clean(env.BKASH_CALLBACK_URL),
-} as const;
+  /** Explicit BKASH_CALLBACK_URL wins; otherwise derived per request. */
+  get callbackUrl(): string | undefined {
+    return resolveBkashCallbackUrl().url;
+  },
+};
 
 export const isBkashConfigured = (): boolean =>
   Boolean(
@@ -68,8 +86,11 @@ export const nagadConfig = {
   merchantNumber: clean(env.NAGAD_MERCHANT_NUMBER),
   privateKey: clean(env.NAGAD_PRIVATE_KEY),
   publicKey: clean(env.NAGAD_PUBLIC_KEY),
-  callbackUrl: clean(env.NAGAD_CALLBACK_URL),
-} as const;
+  /** Explicit NAGAD_CALLBACK_URL wins; otherwise derived per request. */
+  get callbackUrl(): string | undefined {
+    return getNagadCallbackUrl();
+  },
+};
 
 /**
  * True when the dev-only Nagad simulation is active. It is never allowed in

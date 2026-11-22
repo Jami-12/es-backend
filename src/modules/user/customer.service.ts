@@ -1,4 +1,4 @@
-import { Prisma, Role } from "@prisma/client";
+import { OrderStatus, Prisma, Role } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { buildPaginationMeta } from "../../utils/pagination";
 import type {
@@ -67,6 +67,7 @@ export const listCustomers = async (
             where: {
               userId: { in: ids },
               paymentStatus: "PAID",
+              status: { notIn: [OrderStatus.CANCELLED, OrderStatus.RETURNED] },
             },
             _sum: { totalAmount: true },
           }),
@@ -75,6 +76,7 @@ export const listCustomers = async (
             where: {
               userId: { in: ids },
               paymentStatus: "PAID",
+              status: { notIn: [OrderStatus.CANCELLED, OrderStatus.RETURNED] },
             },
             _count: { _all: true },
           }),

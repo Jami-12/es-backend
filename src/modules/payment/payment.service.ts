@@ -2,7 +2,7 @@ import { PaymentMethod, PaymentStatus, Prisma, Role } from "@prisma/client";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
 import { ApiError } from "../../utils/ApiError";
-import { recordAudit } from "../../utils/audit";
+import { recordAudit, recordAuditBestEffort } from "../../utils/audit";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   ConfirmPaymentInput,
@@ -13,6 +13,7 @@ import type {
 } from "../../types/payment.types";
 import type { OrderResponse } from "../../types/order.types";
 import * as orderService from "../order/order.service";
+import { assertPaymentMethodAvailable } from "./payment-availability";
 import { notifyCustomerAndAdmins } from "../notification/notification-events";
 import { getPaymentProvider } from "./providers";
 import { verifyStripeWebhookSignature } from "./providers/card.provider";
@@ -48,11 +49,44 @@ type PaymentRecord = Prisma.PaymentGetPayload<{
  */
 const INITIATION_CLAIM_TIMEOUT_MS = 30 * 1000;
 
-interface PaymentClaimSnapshot {
-  status: PaymentStatus;
-  providerPaymentId: string | null;
-  providerReference: string | null;
-}
+type PaymentClaimSnapshot = Pick<
+  PaymentRecord,
+  | "status"
+  | "method"
+  | "providerPaymentId"
+  | "providerReference"
+  | "providerResponse"
+  | "transactionId"
+  | "paidAt"
+> & {
+  /** Order method before the claim, needed when a retry changes provider. */
+  orderPaymentMethod: PaymentMethod;
+};
+
+/**
+ * A different provider may only be selected once the previous attempt is no
+ * longer live. A session with a provider reference can still settle, so it must
+ * be resumed or expired by the provider before being replaced.
+ */
+const canSwitchPaymentMethod = (payment: PaymentRecord): boolean => {
+  if (
+    payment.status === PaymentStatus.FAILED ||
+    payment.status === PaymentStatus.CANCELLED
+  ) {
+    return true;
+  }
+
+  if (!payment.providerPaymentId) {
+    if (payment.status === PaymentStatus.PENDING) return true;
+
+    return (
+      payment.status === PaymentStatus.PROCESSING &&
+      Date.now() - payment.updatedAt.getTime() >= INITIATION_CLAIM_TIMEOUT_MS
+    );
+  }
+
+  return false;
+};
 
 const toPaymentResponse = (payment: PaymentRecord): PaymentResponse => ({
   id: payment.id,
@@ -313,6 +347,7 @@ const resumeProcessingPayment = async (
 const claimPaymentForInitiation = async (
   orderId: string,
   paymentId: string,
+  method: PaymentMethod,
 ): Promise<{
   claimed: boolean;
   payment: PaymentRecord;
@@ -325,10 +360,20 @@ const claimPaymentForInitiation = async (
     // released.
     await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
 
-    const payment = await tx.payment.findUnique({
-      where: { id: paymentId },
-      select: paymentSelect,
-    });
+    const [order, payment] = await Promise.all([
+      tx.order.findUnique({
+        where: { id: orderId },
+        select: { paymentMethod: true },
+      }),
+      tx.payment.findUnique({
+        where: { id: paymentId },
+        select: paymentSelect,
+      }),
+    ]);
+
+    if (!order) {
+      throw ApiError.notFound("Order not found");
+    }
 
     if (!payment) {
       throw ApiError.notFound("Payment record not found for this order");
@@ -340,6 +385,14 @@ const claimPaymentForInitiation = async (
 
     if (payment.status === PaymentStatus.REFUNDED) {
       throw ApiError.conflict("This order payment has been refunded");
+    }
+
+    const switchingMethod = method !== order.paymentMethod;
+
+    if (switchingMethod && !canSwitchPaymentMethod(payment)) {
+      throw ApiError.conflict(
+        "Another payment method is already in progress for this order. Please wait for it to finish or expire.",
+      );
     }
 
     if (payment.status === PaymentStatus.PROCESSING) {
@@ -358,23 +411,39 @@ const claimPaymentForInitiation = async (
 
     const snapshot: PaymentClaimSnapshot = {
       status: payment.status,
+      method: payment.method,
+      orderPaymentMethod: order.paymentMethod,
       providerPaymentId: payment.providerPaymentId,
       providerReference: payment.providerReference,
+      providerResponse: payment.providerResponse,
+      transactionId: payment.transactionId,
+      paidAt: payment.paidAt,
     };
 
     const updated = await tx.payment.update({
       where: { id: paymentId },
       data: {
         status: PaymentStatus.PROCESSING,
+        ...(switchingMethod ? { method } : {}),
         providerPaymentId: null,
         providerReference: null,
+        ...(switchingMethod
+          ? {
+              providerResponse: Prisma.DbNull,
+              transactionId: null,
+              paidAt: null,
+            }
+          : {}),
       },
       select: paymentSelect,
     });
 
     await tx.order.update({
       where: { id: orderId },
-      data: { paymentStatus: PaymentStatus.PROCESSING },
+      data: {
+        paymentStatus: PaymentStatus.PROCESSING,
+        ...(switchingMethod ? { paymentMethod: method } : {}),
+      },
     });
 
     return { claimed: true, payment: updated, snapshot };
@@ -384,6 +453,7 @@ const releasePaymentClaim = async (
   orderId: string,
   paymentId: string,
   snapshot: PaymentClaimSnapshot,
+  method: PaymentMethod,
 ): Promise<void> => {
   try {
     await prisma.$transaction(async (tx) => {
@@ -391,7 +461,7 @@ const releasePaymentClaim = async (
 
       const current = await tx.payment.findUnique({
         where: { id: paymentId },
-        select: { status: true, providerPaymentId: true },
+        select: { status: true, method: true, providerPaymentId: true },
       });
 
       // A callback or webhook may have advanced the payment while the gateway
@@ -400,7 +470,8 @@ const releasePaymentClaim = async (
       if (
         !current ||
         current.status !== PaymentStatus.PROCESSING ||
-        current.providerPaymentId
+        current.providerPaymentId ||
+        current.method !== method
       ) {
         return;
       }
@@ -409,14 +480,21 @@ const releasePaymentClaim = async (
         where: { id: paymentId },
         data: {
           status: snapshot.status,
+          method: snapshot.method,
           providerPaymentId: snapshot.providerPaymentId,
           providerReference: snapshot.providerReference,
+          providerResponse: snapshot.providerResponse ?? Prisma.DbNull,
+          transactionId: snapshot.transactionId,
+          paidAt: snapshot.paidAt,
         },
       });
 
       await tx.order.update({
         where: { id: orderId },
-        data: { paymentStatus: snapshot.status },
+        data: {
+          paymentStatus: snapshot.status,
+          paymentMethod: snapshot.orderPaymentMethod,
+        },
       });
     });
   } catch (error) {
@@ -429,6 +507,98 @@ const releasePaymentClaim = async (
       },
     );
   }
+};
+
+/** Switches an unpaid order to COD without creating a gateway session. */
+const switchToCashOnDelivery = async (
+  requester: AuthenticatedUser,
+  orderId: string,
+  paymentId: string,
+): Promise<PaymentRecord> => {
+  const pendingAudit: { input?: Parameters<typeof recordAuditBestEffort>[0] } =
+    {};
+
+  const payment = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
+
+    const [order, current] = await Promise.all([
+      tx.order.findUnique({
+        where: { id: orderId },
+        select: { id: true, orderNumber: true, status: true, paymentMethod: true },
+      }),
+      tx.payment.findUnique({
+        where: { id: paymentId },
+        select: paymentSelect,
+      }),
+    ]);
+
+    if (!order || !current) {
+      throw ApiError.notFound("Order or payment not found");
+    }
+
+    if (current.status === PaymentStatus.PAID) {
+      throw ApiError.conflict("This order has already been paid");
+    }
+
+    if (current.status === PaymentStatus.REFUNDED) {
+      throw ApiError.conflict("This order payment has been refunded");
+    }
+
+    if (!canSwitchPaymentMethod(current)) {
+      throw ApiError.conflict(
+        "The previous payment method is still active. Wait for it to expire before choosing cash on delivery.",
+      );
+    }
+
+    const updated = await tx.payment.update({
+      where: { id: paymentId },
+      data: {
+        method: PaymentMethod.CASH_ON_DELIVERY,
+        status: PaymentStatus.PENDING,
+        providerPaymentId: null,
+        providerReference: null,
+        providerResponse: Prisma.DbNull,
+        transactionId: null,
+        paidAt: null,
+      },
+      select: paymentSelect,
+    });
+
+    await tx.order.update({
+      where: { id: orderId },
+      data: {
+        paymentMethod: PaymentMethod.CASH_ON_DELIVERY,
+        paymentStatus: PaymentStatus.PENDING,
+        ...(order.status === "PENDING"
+          ? { status: "CONFIRMED" as const }
+          : {}),
+      },
+    });
+
+    pendingAudit.input = {
+      userId: requester.id,
+      action: "CHANGE_ORDER_PAYMENT_METHOD",
+      entity: "Order",
+      entityId: orderId,
+      description: `Changed payment method to cash on delivery for order ${order.orderNumber}`,
+      oldData: {
+        paymentMethod: order.paymentMethod,
+        paymentStatus: current.status,
+      },
+      newData: {
+        paymentMethod: PaymentMethod.CASH_ON_DELIVERY,
+        paymentStatus: PaymentStatus.PENDING,
+      },
+    };
+
+    return updated;
+  });
+
+  if (pendingAudit.input) {
+    await recordAuditBestEffort(pendingAudit.input);
+  }
+
+  return payment;
 };
 
 export const getPaymentById = async (
@@ -469,10 +639,7 @@ export const initiatePayment = async (
     throw ApiError.forbidden("You can only pay for your own orders");
   }
 
-  if (
-    order.status === "CANCELLED" ||
-    order.status === "RETURNED"
-  ) {
+  if (order.status === "CANCELLED" || order.status === "RETURNED") {
     throw ApiError.conflict("This order can no longer be paid");
   }
 
@@ -480,24 +647,39 @@ export const initiatePayment = async (
     throw ApiError.notFound("Payment record not found for this order");
   }
 
-  if (order.payment.status === PaymentStatus.PAID) {
-    throw ApiError.conflict("This order has already been paid");
-  }
+  const paymentId = order.payment.id;
 
-  const method = requestedMethod ?? order.paymentMethod;
-
-  if (method !== order.paymentMethod) {
-    throw ApiError.badRequest(
-      `This order was created with ${order.paymentMethod}. Create a new order to use a different payment method.`,
+  if (
+    order.payment.status === PaymentStatus.PAID ||
+    order.payment.status === PaymentStatus.REFUNDED
+  ) {
+    throw ApiError.conflict(
+      `This order payment is already ${order.payment.status.toLowerCase()}`,
     );
   }
 
-  if (order.paymentMethod === "CASH_ON_DELIVERY") {
-    const payment = await loadPaymentRecord(order.payment.id);
+  const method = requestedMethod ?? order.paymentMethod;
+  const methodChanged = method !== order.paymentMethod;
+
+  // Dashboard toggles and env capability are checked before any DB mutation.
+  await assertPaymentMethodAvailable(method);
+
+  const existingPayment = await loadPaymentRecord(paymentId);
+
+  if (methodChanged && !canSwitchPaymentMethod(existingPayment)) {
+    throw ApiError.conflict(
+      "The previous payment method is still active. Wait for it to finish or expire before choosing another one.",
+    );
+  }
+
+  if (method === PaymentMethod.CASH_ON_DELIVERY) {
+    const payment = methodChanged
+      ? await switchToCashOnDelivery(requester, order.id, paymentId)
+      : existingPayment;
 
     return {
       payment: toPaymentResponse(payment),
-      method: order.paymentMethod,
+      method,
       paymentStatus: payment.status,
       message:
         "Cash on Delivery requires no online initiation. Payment will be collected at delivery.",
@@ -505,35 +687,38 @@ export const initiatePayment = async (
     };
   }
 
-  const provider = getPaymentProvider(order.paymentMethod);
+  const provider = getPaymentProvider(method);
 
   if (!provider) {
-    throw ApiError.badRequest(
-      `Payment method ${order.paymentMethod} is not supported`,
-    );
+    throw ApiError.badRequest(`Payment method ${method} is not supported`);
   }
 
   if (!provider.isConfigured()) {
     throw new ApiError(
       503,
-      `${order.paymentMethod} payments are not configured on this server yet.`,
+      `${method} payments are not configured on this server yet.`,
     );
   }
 
-  const existingPayment = await loadPaymentRecord(order.payment.id);
+  // Providers receive a copy with the newly selected method so callback data
+  // and gateway metadata are built for the method the customer actually chose.
+  const paymentOrder =
+    methodChanged === true ? { ...order, paymentMethod: method } : order;
+  const pendingAudit: { input?: Parameters<typeof recordAuditBestEffort>[0] } =
+    {};
 
   /**
    * bKash, Nagad and Stripe sessions are reusable while the customer is still
-   * on the provider page. Re-check the existing session before creating a new
-   * one so a page refresh or double click cannot leave an orphaned gateway
-   * payment that could later be paid by the customer.
+   * on the provider page. Only resume when the method has not changed; an old
+   * provider session must never be resumed after switching gateways.
    */
   if (
+    !methodChanged &&
     existingPayment.status === PaymentStatus.PROCESSING &&
     existingPayment.providerPaymentId
   ) {
     const resumed = await resumeProcessingPayment(
-      order,
+      paymentOrder,
       provider,
       existingPayment,
     );
@@ -545,13 +730,14 @@ export const initiatePayment = async (
 
   const claim = await claimPaymentForInitiation(
     order.id,
-    existingPayment.id,
+    paymentId,
+    method,
   );
 
   if (!claim.claimed) {
-    if (claim.payment.providerPaymentId) {
+    if (claim.payment.providerPaymentId && claim.payment.method === method) {
       const resumed = await resumeProcessingPayment(
-        order,
+        paymentOrder,
         provider,
         claim.payment,
       );
@@ -569,26 +755,43 @@ export const initiatePayment = async (
   let initiation: PaymentInitiationResult;
 
   try {
-    initiation = await provider.initiate(order);
+    initiation = await provider.initiate(paymentOrder);
   } catch (error) {
     if (claim.snapshot) {
       await releasePaymentClaim(
         order.id,
-        existingPayment.id,
+        paymentId,
         claim.snapshot,
+        method,
       );
     }
 
     throw error;
   }
 
-  const initiatingPaymentId = order.payment.id;
+  pendingAudit.input = methodChanged
+    ? {
+        userId: requester.id,
+        action: "CHANGE_ORDER_PAYMENT_METHOD",
+        entity: "Order",
+        entityId: order.id,
+        description: `Changed payment method from ${order.paymentMethod} to ${method} for order ${order.orderNumber}`,
+        oldData: {
+          paymentMethod: order.paymentMethod,
+          paymentStatus: existingPayment.status,
+        },
+        newData: {
+          paymentMethod: method,
+          paymentStatus: initiation.paymentStatus,
+        },
+      }
+    : undefined;
 
   await prisma.$transaction(async (tx) => {
     await tx.payment.update({
-      where: { id: initiatingPaymentId },
+      where: { id: paymentId },
       data: {
-        method: order.paymentMethod,
+        method: initiation.method,
         status: initiation.paymentStatus,
         providerPaymentId: initiation.providerPaymentId ?? null,
         providerReference: initiation.providerReference ?? null,
@@ -597,7 +800,10 @@ export const initiatePayment = async (
     });
     await tx.order.update({
       where: { id: order.id },
-      data: { paymentStatus: initiation.paymentStatus },
+      data: {
+        paymentStatus: initiation.paymentStatus,
+        ...(methodChanged ? { paymentMethod: method } : {}),
+      },
     });
 
     // Notify once when an order actually moves into PROCESSING. Retries that
@@ -611,11 +817,15 @@ export const initiatePayment = async (
         title: "Payment processing",
         message: `Payment for order ${order.orderNumber} is being processed.`,
         type: "ORDER",
-        adminMessage: `Payment for order ${order.orderNumber} is processing with ${order.paymentMethod}.`,
+        adminMessage: `Payment for order ${order.orderNumber} is processing with ${method}.`,
         orderId: order.id,
       });
     }
   });
+
+  if (pendingAudit.input) {
+    await recordAuditBestEffort(pendingAudit.input);
+  }
 
   const payment = await loadPaymentRecord(order.payment.id);
 

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { PaymentMethod } from "@prisma/client";
 import { env } from "../config/env";
+import { getBackendOrigin } from "../config/origins";
 import { getReceiptSettings } from "../modules/settings/receipt-settings.service";
 import type { OrderResponse, ReceiptData } from "../types/order.types";
 
@@ -17,9 +18,9 @@ export const generateTransactionId = (method: PaymentMethod): string => {
 };
 
 export const buildReceiptUrl = (orderId: string): string => {
-  const path = `/api/v1/orders/${orderId}/receipt`;
-  const baseUrl = env.PUBLIC_BASE_URL?.replace(/\/+$/, "");
-  return baseUrl ? `${baseUrl}${path}` : path;
+  const path = `/api/v1/orders/${encodeURIComponent(orderId)}/receipt`;
+  const baseUrl = getBackendOrigin().replace(/\/+$/, "");
+  return `${baseUrl}${path}`;
 };
 
 export const buildReceipt = async (order: OrderResponse): Promise<ReceiptData> => {

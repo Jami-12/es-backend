@@ -21,6 +21,11 @@ export interface SettingsResponse {
   showBrands: boolean;
   showPromoBanners: boolean;
   showNewsletter: boolean;
+  /** Payment methods enabled from the dashboard. */
+  codEnabled: boolean;
+  bkashEnabled: boolean;
+  nagadEnabled: boolean;
+  stripeEnabled: boolean;
   categorySections: HomeCategorySectionResponse[];
   /** Convenience list of category ids whose home section is currently visible. */
   visibleCategoryIds: string[];
@@ -45,6 +50,10 @@ export interface UpdateSettingsInput {
   showBrands?: boolean;
   showPromoBanners?: boolean;
   showNewsletter?: boolean;
+  codEnabled?: boolean;
+  bkashEnabled?: boolean;
+  nagadEnabled?: boolean;
+  stripeEnabled?: boolean;
   categorySections?: HomeCategorySectionInput[];
 }
 

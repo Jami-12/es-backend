@@ -5,14 +5,17 @@ import type {
   InitiatePaymentInput,
   PaymentWebhookInput,
 } from "../../types/payment.types";
-import { env } from "../../config/env";
+import {
+  getFrontendOrigin,
+  getNagadCallbackUrl,
+} from "../../config/origins";
 import { prisma } from "../../config/prisma";
 import { bkashConfig, isNagadSimulationEnabled } from "../../config/payment.config";
 import { ApiError } from "../../utils/ApiError";
 import { sendSuccess } from "../../utils/ApiResponse";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { getAuthUser } from "../../utils/auth";
-import { paymentProviderStatus } from "../../config/payment.config";
+import { getEffectivePaymentProviderStatus } from "./payment-availability";
 import * as paymentService from "./payment.service";
 
 const toFlatStringRecord = (value: unknown): Record<string, string> => {
@@ -50,7 +53,7 @@ const escapeHtml = (value: string): string =>
 
 export const getProviderStatus = asyncHandler(async (_req, res) => {
   sendSuccess(res, {
-    data: { providers: paymentProviderStatus() },
+    data: { providers: await getEffectivePaymentProviderStatus() },
     message: "Payment provider configuration retrieved successfully",
   });
 });
@@ -159,8 +162,8 @@ export const providerCallback = asyncHandler(async (req, res) => {
   }
 
   const redirectUrl = new URL(
-    `/dashboard/orders/${payment.orderId}`,
-    env.CLIENT_URL.replace(/\/+$/, ""),
+    `/dashboard/orders/${encodeURIComponent(payment.orderId)}`,
+    getFrontendOrigin(),
   );
   redirectUrl.searchParams.set("paymentStatus", payment.status);
 
@@ -270,9 +273,21 @@ export const nagadSimulationPage = asyncHandler(async (req, res) => {
     throw ApiError.badRequest("orderId and ref are required");
   }
 
-  const callbackBase = `${env.PUBLIC_BASE_URL.replace(/\/+$/, "")}/api/v1/payments/nagad/callback`;
-  const approveUrl = `${callbackBase}?order_id=${encodeURIComponent(orderId)}&payment_ref_id=${encodeURIComponent(reference)}&status=Success`;
-  const cancelUrl = `${callbackBase}?order_id=${encodeURIComponent(orderId)}&payment_ref_id=${encodeURIComponent(reference)}&status=Aborted`;
+  const callbackBase = getNagadCallbackUrl();
+
+  if (!callbackBase) {
+    throw new ApiError(503, "Nagad callback URL is not configured");
+  }
+
+  const approveUrl = new URL(callbackBase);
+  approveUrl.searchParams.set("order_id", orderId);
+  approveUrl.searchParams.set("payment_ref_id", reference);
+  approveUrl.searchParams.set("status", "Success");
+
+  const cancelUrl = new URL(callbackBase);
+  cancelUrl.searchParams.set("order_id", orderId);
+  cancelUrl.searchParams.set("payment_ref_id", reference);
+  cancelUrl.searchParams.set("status", "Aborted");
 
   res.type("html").send(`<!doctype html>
 <html lang="en">
@@ -318,8 +333,8 @@ export const nagadSimulationPage = asyncHandler(async (req, res) => {
       <div class="row"><span>Amount</span><span>BDT ${escapeHtml(amount || "0.00")}</span></div>
       <div class="row"><span>Reference</span><span>${escapeHtml(reference)}</span></div>
       <div class="actions">
-        <a class="btn pay" href="${escapeHtml(approveUrl)}">Approve payment</a>
-        <a class="btn cancel" href="${escapeHtml(cancelUrl)}">Cancel payment</a>
+        <a class="btn pay" href="${escapeHtml(approveUrl.toString())}">Approve payment</a>
+        <a class="btn cancel" href="${escapeHtml(cancelUrl.toString())}">Cancel payment</a>
       </div>
       <p class="note">This page only exists while <code>NAGAD_SIMULATION=true</code> in a non-production environment.</p>
     </div>

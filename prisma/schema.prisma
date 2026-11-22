@@ -280,6 +280,12 @@ model SiteSettings {
   showBrands           Boolean  @default(true)
   showPromoBanners     Boolean  @default(true)
   showNewsletter       Boolean  @default(true)
+  /// Dashboard-controlled payment method availability. Defaults keep existing
+  /// installs unchanged; env configuration remains a hard capability cap.
+  codEnabled           Boolean  @default(true)
+  bkashEnabled         Boolean  @default(true)
+  nagadEnabled         Boolean  @default(true)
+  stripeEnabled        Boolean  @default(true)
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 

@@ -3,7 +3,9 @@ import express, { type Request } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import { env } from "./config/env";
+import { isOriginAllowed } from "./config/origins";
 import { prisma } from "./config/prisma";
+import { runWithRequestOriginHints } from "./config/request-context";
 import { errorHandler } from "./middlewares/error.middleware";
 import { notFoundHandler } from "./middlewares/notFound.middleware";
 import { globalRateLimiter } from "./middlewares/rateLimit.middleware";
@@ -19,7 +21,22 @@ const configuredOrigins = env.CORS_ORIGIN.split(",")
   .filter(Boolean);
 
 const corsOrigin: CorsOptions["origin"] =
-  env.CORS_ORIGIN === "*" ? "*" : configuredOrigins;
+  env.CORS_ORIGIN === "*"
+    ? "*"
+    : (requestOrigin, callback) => {
+        // Preflight requests without an Origin are safe to continue.
+        if (!requestOrigin) {
+          callback(null, true);
+          return;
+        }
+
+        callback(
+          null,
+          isOriginAllowed(requestOrigin, configuredOrigins)
+            ? requestOrigin
+            : false,
+        );
+      };
 
 const corsOptions: CorsOptions = {
   origin: corsOrigin,
@@ -30,6 +47,24 @@ const corsOptions: CorsOptions = {
 };
 
 app.disable("x-powered-by");
+
+// Publish per-request host/origin hints before CORS and routes so URL helpers
+// can derive the active Vercel origin without stale hardcoded domains.
+app.use((req, _res, next) => {
+  const forwardedHost = req
+    .header("x-forwarded-host")
+    ?.split(",")[0]
+    ?.trim();
+
+  runWithRequestOriginHints(
+    {
+      host: forwardedHost || req.header("host") || req.hostname,
+      origin: req.header("origin") || undefined,
+      referer: req.header("referer") || undefined,
+    },
+    () => next(),
+  );
+});
 
 // Vercel terminates TLS at the edge; trusting one hop keeps req.ip (and
 // therefore rate limiting and audit logs) based on the real client address.

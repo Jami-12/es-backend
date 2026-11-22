@@ -106,11 +106,13 @@ export const googleCallback = asyncHandler(async (req, res) => {
     typeof req.query.state === "string" ? req.query.state : undefined;
   const oauthError =
     typeof req.query.error === "string" ? req.query.error : undefined;
+  const stateOrigin = googleOAuthService.getStateFrontendOrigin(state);
 
   if (oauthError) {
     res.redirect(
       googleOAuthService.buildFrontendErrorUrl(
         `Google authentication was cancelled: ${oauthError}`,
+        stateOrigin,
       ),
     );
     return;
@@ -120,13 +122,15 @@ export const googleCallback = asyncHandler(async (req, res) => {
     res.redirect(
       googleOAuthService.buildFrontendErrorUrl(
         "Google callback is missing code or state",
+        stateOrigin,
       ),
     );
     return;
   }
 
   try {
-    googleOAuthService.verifyState(state);
+    const verifiedState = googleOAuthService.verifyState(state);
+    const frontendOrigin = verifiedState.frontendOrigin ?? stateOrigin;
     const profile = await googleOAuthService.exchangeCodeForProfile(code);
     const result = await authService.loginWithGoogle(profile);
 
@@ -134,11 +138,12 @@ export const googleCallback = asyncHandler(async (req, res) => {
       googleOAuthService.buildFrontendCallbackUrl(
         result.accessToken,
         result.refreshToken,
+        frontendOrigin,
       ),
     );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Google authentication failed";
-    res.redirect(googleOAuthService.buildFrontendErrorUrl(message));
+    res.redirect(googleOAuthService.buildFrontendErrorUrl(message, stateOrigin));
   }
 });

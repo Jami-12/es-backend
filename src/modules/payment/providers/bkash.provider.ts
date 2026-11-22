@@ -1,5 +1,9 @@
 import { PaymentMethod, PaymentStatus, Prisma } from "@prisma/client";
-import { bkashConfig, isBkashConfigured } from "../../../config/payment.config";
+import {
+  bkashCallbackConfigError,
+  bkashConfig,
+  isBkashConfigured,
+} from "../../../config/payment.config";
 import { ApiError } from "../../../utils/ApiError";
 import type {
   PaymentInitiationResult,
@@ -92,11 +96,6 @@ const waitForSettlement = (): Promise<void> =>
 const toJson = (value: unknown): Prisma.InputJsonValue =>
   JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 
-const appendQuery = (url: string, params: Record<string, string>): string => {
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}${new URLSearchParams(params).toString()}`;
-};
-
 const parseHttpsRedirectUrl = (value: string): string | undefined => {
   try {
     const url = new URL(value);
@@ -115,6 +114,23 @@ const requireBaseUrl = (): string => {
   }
 
   return bkashConfig.baseUrl.replace(/\/+$/, "");
+};
+
+/**
+ * Returns the canonical, pre-normalised merchant callback URL. This check is
+ * local and happens before any gateway call, so a bad configuration fails fast
+ * instead of producing bKash's opaque "Invalid Merchant Callback URL" error.
+ */
+const requireBkashCallbackUrl = (): string => {
+  if (!bkashConfig.callbackUrl) {
+    throw new ApiError(
+      503,
+      bkashCallbackConfigError ??
+        "BKASH_CALLBACK_URL is not configured. Set it to https://<your-backend>/api/v1/payments/bkash/callback (or set PUBLIC_BASE_URL to your backend's public origin).",
+    );
+  }
+
+  return bkashConfig.callbackUrl;
 };
 
 const requestToken = async (): Promise<CachedToken> => {
@@ -464,22 +480,10 @@ export const bkashProvider: PaymentProvider = {
   isConfigured: isBkashConfigured,
 
   async initiate(order): Promise<PaymentInitiationResult> {
-    if (!bkashConfig.callbackUrl) {
-      throw new ApiError(503, "BKASH_CALLBACK_URL is not configured");
-    }
-
-    if (
-      !bkashConfig.callbackUrl.includes("/api/v1/payments/bkash/callback")
-    ) {
-      throw new ApiError(
-        503,
-        "BKASH_CALLBACK_URL must point to /api/v1/payments/bkash/callback",
-      );
-    }
-
-    const callbackUrl = appendQuery(bkashConfig.callbackUrl, {
-      orderId: order.id,
-    });
+    // bKash expects the registered base callback URL exactly. Query parameters
+    // such as orderId are not appended here; callbacks are correlated with the
+    // paymentID that bKash sends back.
+    const callbackUrl = requireBkashCallbackUrl();
 
     const gateway = await bkashAuthenticatedRequest(
       "/tokenized/checkout/create",

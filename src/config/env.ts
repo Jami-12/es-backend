@@ -39,8 +39,6 @@ const optionalUrl = z.preprocess(
   z.string().trim().url("Must be a valid absolute URL").optional(),
 );
 
-const requiredUrl = z.string().trim().url("Must be a valid absolute URL");
-
 const jwtExpiry = z
   .string()
   .trim()
@@ -103,6 +101,19 @@ const databaseUrlSchema = z
     }
   });
 
+const normalizeCorsOrigins = (value: string): string =>
+  value === "*"
+    ? value
+    : value
+        .split(",")
+        .map((origin) => {
+          const trimmed = origin.trim();
+          // Accept a bare wildcard host such as *.vercel.app as shorthand.
+          return trimmed.startsWith("*.") ? `https://${trimmed}` : trimmed;
+        })
+        .filter(Boolean)
+        .join(",");
+
 const corsOriginSchema = z
   .string()
   .trim()
@@ -112,21 +123,29 @@ const corsOriginSchema = z
       return true;
     }
 
-    return value.split(",").every((origin) => {
-      const trimmed = origin.trim();
+    return normalizeCorsOrigins(value)
+      .split(",")
+      .every((origin) => {
+        const trimmed = origin.trim();
 
-      if (!trimmed) {
-        return false;
-      }
+        if (!trimmed) {
+          return false;
+        }
 
-      try {
-        const parsed = new URL(trimmed);
-        return parsed.protocol === "http:" || parsed.protocol === "https:";
-      } catch {
-        return false;
-      }
-    });
-  }, "CORS_ORIGIN must be * or a comma-separated list of http(s) URLs");
+        // Wildcard host patterns let Vercel preview deployments through.
+        if (/^https?:\/\/\*\.([A-Za-z0-9-]+\.)+[A-Za-z]{2,}$/.test(trimmed)) {
+          return true;
+        }
+
+        try {
+          const parsed = new URL(trimmed);
+          return parsed.protocol === "http:" || parsed.protocol === "https:";
+        } catch {
+          return false;
+        }
+      });
+  }, "CORS_ORIGIN must be *, a comma-separated list of http(s) URLs, or wildcard hosts such as https://*.vercel.app")
+  .transform(normalizeCorsOrigins);
 
 const currencySchema = z
   .string()
@@ -148,8 +167,12 @@ const envSchema = z
       .enum(["development", "test", "production"])
       .default("development"),
     PORT: z.coerce.number().int().min(1).max(65535).default(4000),
-    // Injected by Vercel at build and runtime; used to trust edge hop headers.
+    // Injected by Vercel at build and runtime. VERCEL flags the platform;
+    // VERCEL_URL / VERCEL_BRANCH_URL are hostnames used as safe HTTPS fallbacks
+    // for callbacks when explicit URLs are not configured.
     VERCEL: optionalString,
+    VERCEL_URL: optionalString,
+    VERCEL_BRANCH_URL: optionalString,
 
     DATABASE_URL: databaseUrlSchema,
 
@@ -164,7 +187,8 @@ const envSchema = z
 
     BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
 
-    FRONTEND_URL: requiredUrl.default("http://localhost:3000"),
+    // Left optional on purpose: origins.ts derives these on Vercel when unset.
+    FRONTEND_URL: optionalUrl,
     CLIENT_URL: optionalUrl,
     CORS_ORIGIN: z.preprocess(
       emptyToUndefined,
@@ -223,9 +247,8 @@ const envSchema = z
 
     GOOGLE_CLIENT_ID: optionalString,
     GOOGLE_CLIENT_SECRET: optionalString,
-    GOOGLE_CALLBACK_URL: requiredUrl.default(
-      "http://localhost:4000/api/v1/auth/google/callback",
-    ),
+    // Optional: derived from the active backend/frontend origin when unset.
+    GOOGLE_CALLBACK_URL: optionalUrl,
     GOOGLE_SUCCESS_REDIRECT_URL: optionalUrl,
 
     BKASH_ENABLED: booleanFromEnv.default(false),
@@ -329,21 +352,28 @@ const envSchema = z
       ["BKASH_APP_SECRET", value.BKASH_APP_SECRET],
       ["BKASH_USERNAME", value.BKASH_USERNAME],
       ["BKASH_PASSWORD", value.BKASH_PASSWORD],
-      ["BKASH_CALLBACK_URL", value.BKASH_CALLBACK_URL],
     ]);
+
+    // BKASH_CALLBACK_URL is intentionally optional here. payment.config derives
+    // a canonical callback from PUBLIC_BASE_URL (the backend's public origin)
+    // when it is absent, and reports a clear error if no usable URL can be built.
+    // CLIENT_URL is only the post-callback browser redirect and is never sent
+    // to bKash.
 
     const nagadSimulation =
       value.NAGAD_ENABLED &&
       value.NAGAD_SIMULATION &&
       value.NODE_ENV !== "production";
 
+    // NAGAD_CALLBACK_URL is optional: origins.ts derives the canonical
+    // /api/v1/payments/nagad/callback URL from PUBLIC_BASE_URL or the active
+    // Vercel origin. An explicit value always wins.
     requireWhenEnabled(value.NAGAD_ENABLED && !nagadSimulation, "Nagad", [
       ["NAGAD_BASE_URL", value.NAGAD_BASE_URL],
       ["NAGAD_MERCHANT_ID", value.NAGAD_MERCHANT_ID],
       ["NAGAD_MERCHANT_NUMBER", value.NAGAD_MERCHANT_NUMBER],
       ["NAGAD_PRIVATE_KEY", value.NAGAD_PRIVATE_KEY],
       ["NAGAD_PUBLIC_KEY", value.NAGAD_PUBLIC_KEY],
-      ["NAGAD_CALLBACK_URL", value.NAGAD_CALLBACK_URL],
     ]);
 
     const stripeEnabled =
@@ -443,6 +473,14 @@ if (!parsed.success) {
 }
 
 const rawEnv = parsed.data;
+
+/**
+ * Explicitly configured values only, before the safe localhost fallbacks
+ * applied to `env`. URL resolution uses these so it can tell "not configured"
+ * apart from a fallback and derive the active Vercel origin correctly.
+ */
+export const configuredEnv = rawEnv;
+
 const stripeSecretKey =
   rawEnv.STRIPE_SECRET_KEY ?? rawEnv.CARD_SECRET_KEY;
 const stripeWebhookSecret =
@@ -461,8 +499,10 @@ export const env = {
   STRIPE_PUBLISHABLE_KEY: stripePublishableKey,
   STRIPE_WEBHOOK_SECRET: stripeWebhookSecret,
   STRIPE_CURRENCY: rawEnv.STRIPE_CURRENCY ?? rawEnv.CARD_CURRENCY ?? "BDT",
-  CLIENT_URL: rawEnv.CLIENT_URL ?? rawEnv.FRONTEND_URL,
-  CORS_ORIGIN: rawEnv.CORS_ORIGIN ?? rawEnv.FRONTEND_URL,
+  CLIENT_URL:
+    rawEnv.CLIENT_URL ?? rawEnv.FRONTEND_URL ?? "http://localhost:3000",
+  CORS_ORIGIN:
+    rawEnv.CORS_ORIGIN ?? rawEnv.FRONTEND_URL ?? "http://localhost:3000",
   PUBLIC_BASE_URL:
     rawEnv.PUBLIC_BASE_URL ?? `http://localhost:${rawEnv.PORT}`,
   isProduction: rawEnv.NODE_ENV === "production",

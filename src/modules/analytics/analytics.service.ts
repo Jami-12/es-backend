@@ -4,6 +4,7 @@ import {
   PaymentStatus,
   ProductStatus,
   Role,
+  type Prisma,
 } from "@prisma/client";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
@@ -24,6 +25,26 @@ import type {
 const dayKey = (date: Date): string => date.toISOString().slice(0, 10);
 
 const monthKey = (date: Date): string => date.toISOString().slice(0, 7);
+
+/**
+ * Cancelled and returned orders are never collectable. Every revenue figure
+ * must exclude them so dashboard revenue cannot count money that was refunded
+ * or never collected. Shipping remains included because it is part of the
+ * amount actually collected from the customer.
+ */
+const collectablePaymentWhere = (
+  paidAt?: { gte: Date },
+): Prisma.PaymentWhereInput => ({
+  order: { status: { notIn: [OrderStatus.CANCELLED, OrderStatus.RETURNED] } },
+  ...(paidAt ? { paidAt } : {}),
+});
+
+const paidPaymentWhere = (
+  paidAt?: { gte: Date },
+): Prisma.PaymentWhereInput => ({
+  ...collectablePaymentWhere(paidAt),
+  status: PaymentStatus.PAID,
+});
 
 const buildDailyBuckets = (days: number): Map<string, DailySalesPoint> => {
   const buckets = new Map<string, DailySalesPoint>();
@@ -213,22 +234,16 @@ export const getAnalyticsOverview = async (): Promise<AnalyticsOverview> => {
     lowStockProducts,
   ] = await Promise.all([
     prisma.payment.aggregate({
-      where: { status: PaymentStatus.PAID },
+      where: paidPaymentWhere(),
       _sum: { amount: true },
       _count: { _all: true },
     }),
     prisma.payment.findMany({
-      where: {
-        status: PaymentStatus.PAID,
-        paidAt: { gte: dailyStart },
-      },
+      where: paidPaymentWhere({ gte: dailyStart }),
       select: { amount: true, paidAt: true, createdAt: true },
     }),
     prisma.payment.findMany({
-      where: {
-        status: PaymentStatus.PAID,
-        paidAt: { gte: monthlyStart },
-      },
+      where: paidPaymentWhere({ gte: monthlyStart }),
       select: { amount: true, paidAt: true, createdAt: true },
     }),
     prisma.order.count(),
@@ -259,6 +274,7 @@ export const getAnalyticsOverview = async (): Promise<AnalyticsOverview> => {
       },
     }),
     prisma.payment.groupBy({
+      where: collectablePaymentWhere(),
       by: ["method", "status"],
       _count: { _all: true },
       _sum: { amount: true },
@@ -333,22 +349,16 @@ export const getRevenueAnalytics = async (): Promise<RevenueAnalytics> => {
 
   const [aggregate, dailyPayments, monthlyPayments] = await Promise.all([
     prisma.payment.aggregate({
-      where: { status: PaymentStatus.PAID },
+      where: paidPaymentWhere(),
       _sum: { amount: true },
       _count: { _all: true },
     }),
     prisma.payment.findMany({
-      where: {
-        status: PaymentStatus.PAID,
-        paidAt: { gte: dailyStart },
-      },
+      where: paidPaymentWhere({ gte: dailyStart }),
       select: { amount: true, paidAt: true, createdAt: true },
     }),
     prisma.payment.findMany({
-      where: {
-        status: PaymentStatus.PAID,
-        paidAt: { gte: monthlyStart },
-      },
+      where: paidPaymentWhere({ gte: monthlyStart }),
       select: { amount: true, paidAt: true, createdAt: true },
     }),
   ]);
@@ -392,17 +402,19 @@ export const getRevenueAnalytics = async (): Promise<RevenueAnalytics> => {
 export const getPaymentAnalytics = async (): Promise<PaymentAnalytics> => {
   const [methodGroups, statusGroups, aggregate] = await Promise.all([
     prisma.payment.groupBy({
+      where: collectablePaymentWhere(),
       by: ["method", "status"],
       _count: { _all: true },
       _sum: { amount: true },
     }),
     prisma.payment.groupBy({
+      where: collectablePaymentWhere(),
       by: ["status"],
       _count: { _all: true },
       _sum: { amount: true },
     }),
     prisma.payment.aggregate({
-      where: { status: PaymentStatus.PAID },
+      where: paidPaymentWhere(),
       _sum: { amount: true },
       _count: { _all: true },
     }),

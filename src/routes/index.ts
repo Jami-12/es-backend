@@ -13,6 +13,7 @@ import { wishlistRoutes } from "../modules/wishlist/wishlist.routes";
 import { addressRoutes } from "../modules/address/address.routes";
 import { orderRoutes } from "../modules/order/order.routes";
 import { publicOrderRoutes } from "../modules/order/public-order.routes";
+import { cashCollectionRoutes } from "../modules/order/cash-collection.routes";
 import { paymentRoutes } from "../modules/payment/payment.routes";
 import { couponRoutes } from "../modules/coupon/coupon.routes";
 import {
@@ -116,6 +117,7 @@ router.use("/employees", employeeRoutes);
 router.use("/salaries", salaryRoutes);
 router.use("/inventory", inventoryRoutes);
 router.use("/accounting", accountingRoutes);
+router.use("/admin/cash-collections", cashCollectionRoutes);
 router.use("/admin", adminRoutes);
 
 export const apiRouter = router;

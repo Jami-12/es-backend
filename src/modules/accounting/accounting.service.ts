@@ -97,6 +97,9 @@ export const getFinancialSummary = async (
         totalProductCost: true,
         grossProfit: true,
         totalAmount: true,
+        subtotal: true,
+        discountAmount: true,
+        shippingCost: true,
       },
       _count: { _all: true },
     }),
@@ -134,10 +137,19 @@ export const getFinancialSummary = async (
 
   const cogs = toNumber(orderAggregate._sum.totalProductCost);
   const grossProfit = toNumber(orderAggregate._sum.grossProfit);
+  // Product revenue and shipping are reported as distinct figures. Shipping is
+  // an order-level charge and must never be folded into product sales.
+  const productSales = round(
+    toNumber(orderAggregate._sum.subtotal) -
+      toNumber(orderAggregate._sum.discountAmount),
+  );
+  const shippingCollected = round(toNumber(orderAggregate._sum.shippingCost));
   const netRevenue = sales - refunds;
   const netProfit = grossProfit - operatingExpenses;
+  // Margin compares product-only profit with product-only revenue so shipping
+  // cannot distort the percentage.
   const netProfitMargin =
-    netRevenue > 0 ? round((netProfit / netRevenue) * 100) : 0;
+    productSales > 0 ? round((netProfit / productSales) * 100) : 0;
 
   return {
     currency: env.STORE_CURRENCY,
@@ -147,6 +159,8 @@ export const getFinancialSummary = async (
     },
     revenue: {
       sales: round(sales),
+      productSales,
+      shipping: shippingCollected,
       refunds: round(refunds),
       net: round(netRevenue),
     },
@@ -164,7 +178,8 @@ export const getFinancialSummary = async (
     orders: {
       paidCount: orderAggregate._count._all,
       itemsSold: itemAggregate._sum.quantity ?? 0,
-      salesValue: round(toNumber(orderAggregate._sum.totalAmount)),
+      // Product-only sales value; shipping is reported in `revenue.shipping`.
+      salesValue: productSales,
     },
     expenseBreakdown: expenseGroups
       .map((group) => ({

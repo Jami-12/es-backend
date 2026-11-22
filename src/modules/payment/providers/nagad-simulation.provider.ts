@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { PaymentMethod, PaymentStatus, Prisma } from "@prisma/client";
-import { env } from "../../../config/env";
+import { getBackendOrigin } from "../../../config/origins";
 import { isNagadSimulationEnabled } from "../../../config/payment.config";
 import { ApiError } from "../../../utils/ApiError";
 import type {
@@ -21,8 +21,8 @@ const getString = (value: unknown, fallback = ""): string =>
 const toJson = (value: unknown): Prisma.InputJsonValue =>
   JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 
-const publicBaseUrl = (): string =>
-  env.PUBLIC_BASE_URL.replace(/\/+$/, "");
+const simulationBaseUrl = (): string =>
+  getBackendOrigin().replace(/\/+$/, "");
 
 const buildSimulationUrl = (
   orderId: string,
@@ -30,7 +30,9 @@ const buildSimulationUrl = (
   orderNumber: string,
   amount: string,
 ): string => {
-  const url = new URL(`${publicBaseUrl()}/api/v1/payments/nagad/simulate`);
+  const url = new URL(
+    `${simulationBaseUrl()}/api/v1/payments/nagad/simulate`,
+  );
   url.searchParams.set("orderId", orderId);
   url.searchParams.set("ref", reference);
   url.searchParams.set("orderNumber", orderNumber);

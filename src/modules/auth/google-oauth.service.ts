@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { env } from "../../config/env";
+import {
+  getFrontendOrigin,
+  getGoogleCallbackUrl,
+  getGoogleSuccessRedirectUrl,
+  isSafeFrontendOrigin,
+} from "../../config/origins";
 import { ApiError } from "../../utils/ApiError";
 import jwt from "../../utils/jsonwebtoken";
 import type { GoogleProfile } from "./auth.service";
@@ -43,19 +49,78 @@ const requireGoogleConfig = (): { clientId: string; clientSecret: string } => {
   return { clientId, clientSecret };
 };
 
-const createState = (): string =>
-  jwt.sign({ nonce: randomUUID() }, env.JWT_ACCESS_SECRET, {
+interface GoogleOAuthState {
+  nonce: string;
+  /** Storefront that started the login, carried through Google's redirect. */
+  frontendOrigin?: string;
+}
+
+const createState = (frontendOrigin?: string): string => {
+  const payload: GoogleOAuthState = { nonce: randomUUID() };
+
+  if (isSafeFrontendOrigin(frontendOrigin)) {
+    payload.frontendOrigin = frontendOrigin;
+  }
+
+  return jwt.sign(payload, env.JWT_ACCESS_SECRET, {
     expiresIn: STATE_TTL,
     issuer: STATE_ISSUER,
     audience: STATE_AUDIENCE,
   });
+};
 
-export const verifyState = (state: string): void => {
+/**
+ * Reads the storefront hint from an unverified state token. The value is only
+ * used after `isSafeFrontendOrigin` validation, so it cannot redirect users to
+ * an arbitrary host even if the token was tampered with.
+ */
+export const getStateFrontendOrigin = (
+  state: string | undefined,
+): string | undefined => {
+  if (!state) {
+    return undefined;
+  }
+
+  const decoded = jwt.decode(state);
+
+  if (!decoded || typeof decoded === "string") {
+    return undefined;
+  }
+
+  const value = (decoded as Record<string, unknown>).frontendOrigin;
+
+  return typeof value === "string" && isSafeFrontendOrigin(value)
+    ? value
+    : undefined;
+};
+
+export const verifyState = (state: string): GoogleOAuthState => {
   try {
-    jwt.verify(state, env.JWT_ACCESS_SECRET, {
+    const payload = jwt.verify(state, env.JWT_ACCESS_SECRET, {
       issuer: STATE_ISSUER,
       audience: STATE_AUDIENCE,
     });
+
+    if (!payload || typeof payload === "string") {
+      throw new Error("Invalid state payload");
+    }
+
+    const decoded = payload as Record<string, unknown>;
+    const nonce = decoded.nonce;
+
+    if (typeof nonce !== "string" || nonce.length === 0) {
+      throw new Error("Invalid state payload");
+    }
+
+    const frontendOrigin = decoded.frontendOrigin;
+
+    return {
+      nonce,
+      ...(typeof frontendOrigin === "string" &&
+      isSafeFrontendOrigin(frontendOrigin)
+        ? { frontendOrigin }
+        : {}),
+    };
   } catch {
     throw ApiError.badRequest("Invalid or expired Google OAuth state");
   }
@@ -66,10 +131,10 @@ export const buildGoogleAuthUrl = (): string => {
 
   const params = new URLSearchParams({
     client_id: clientId,
-    redirect_uri: env.GOOGLE_CALLBACK_URL,
+    redirect_uri: getGoogleCallbackUrl(),
     response_type: "code",
     scope: "openid email profile",
-    state: createState(),
+    state: createState(getFrontendOrigin()),
     access_type: "online",
     prompt: "select_account",
   });
@@ -89,7 +154,7 @@ export const exchangeCodeForProfile = async (
       code,
       client_id: clientId,
       client_secret: clientSecret,
-      redirect_uri: env.GOOGLE_CALLBACK_URL,
+      redirect_uri: getGoogleCallbackUrl(),
       grant_type: "authorization_code",
     }),
   });
@@ -126,22 +191,20 @@ export const exchangeCodeForProfile = async (
 export const buildFrontendCallbackUrl = (
   accessToken: string,
   refreshToken: string,
+  frontendOrigin?: string,
 ): string => {
-  const base =
-    env.GOOGLE_SUCCESS_REDIRECT_URL?.trim() ||
-    `${env.CLIENT_URL.replace(/\/+$/, "")}/auth/callback`;
-
+  const base = getGoogleSuccessRedirectUrl(frontendOrigin);
   const separator = base.includes("?") ? "&" : "?";
   const params = new URLSearchParams({ accessToken, refreshToken });
 
   return `${base}${separator}${params.toString()}`;
 };
 
-export const buildFrontendErrorUrl = (message: string): string => {
-  const base =
-    env.GOOGLE_SUCCESS_REDIRECT_URL?.trim() ||
-    `${env.CLIENT_URL.replace(/\/+$/, "")}/auth/callback`;
-
+export const buildFrontendErrorUrl = (
+  message: string,
+  frontendOrigin?: string,
+): string => {
+  const base = getGoogleSuccessRedirectUrl(frontendOrigin);
   const separator = base.includes("?") ? "&" : "?";
   const params = new URLSearchParams({ error: message });
 

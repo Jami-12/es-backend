@@ -21,6 +21,52 @@ export interface CollectCodPaymentInput {
   reference?: string;
 }
 
+/** Collection state derived from the order + its payment. */
+export type CashCollectionStatus = "PENDING" | "COLLECTED" | "CANCELLED";
+
+export interface CashCollectionListQuery {
+  page: number;
+  limit: number;
+  status?: CashCollectionStatus;
+  search?: string;
+}
+
+/**
+ * Flat, table-free projection consumed by the admin Cash Collection cards.
+ * Every order (any payment method) is a cash-collection entry.
+ */
+export interface CashCollectionItem {
+  orderId: string;
+  orderNumber: string;
+  customerName: string;
+  /** SKU / product code (falls back to product or line-item id). */
+  productNumber: string;
+  itemCount: number;
+  status: CashCollectionStatus;
+  amount: number;
+  currency: string;
+  paymentMethod: PaymentMethod;
+  orderStatus: OrderStatus;
+  transactionId: string | null;
+  collectedAt: string | null;
+  collectedByName: string | null;
+  createdAt: string;
+}
+
+export interface CashCollectionSummary {
+  pendingCount: number;
+  collectedCount: number;
+  cancelledCount: number;
+  pendingAmount: number;
+  collectedAmount: number;
+}
+
+export interface PaginatedCashCollections {
+  items: CashCollectionItem[];
+  meta: PaginatedResult<CashCollectionItem>["meta"];
+  summary: CashCollectionSummary;
+}
+
 export interface OrderListQuery {
   page: number;
   limit: number;

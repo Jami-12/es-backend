@@ -10,7 +10,8 @@ import {
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
 import { ApiError } from "../../utils/ApiError";
-import { recordAudit } from "../../utils/audit";
+import { assertPaymentMethodAvailable } from "../payment/payment-availability";
+import { recordAuditBestEffort, type AuditInput } from "../../utils/audit";
 import { deleteLedgerEntry, recordIncome, recordRefund } from "../../utils/ledger";
 import {
   calculateShippingCost,
@@ -35,12 +36,17 @@ import {
 } from "../notification/notification-events";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
+  CashCollectionItem,
+  CashCollectionListQuery,
+  CashCollectionStatus,
+  CashCollectionSummary,
   CheckoutInput,
   CollectCodPaymentInput,
   OrderListQuery,
   OrderResponse,
   OrderTrackingEvent,
   OrderTrackingResult,
+  PaginatedCashCollections,
   PaginatedOrders,
   ReceiptData,
   UpdateOrderStatusInput,
@@ -231,6 +237,9 @@ export const checkout = async (
   userId: string,
   input: CheckoutInput,
 ): Promise<OrderResponse> => {
+  // Reject a dashboard-disabled method before locking the cart or touching stock.
+  await assertPaymentMethodAvailable(input.paymentMethod);
+
   const order = await prisma.$transaction(async (tx) => {
     await lockCartRow(tx, userId);
 
@@ -353,9 +362,13 @@ export const checkout = async (
     }
 
     const discountedSubtotal = subtotal.minus(discountAmount);
+    // Shipping is an order-level charge based on the PRODUCT SUBTOTAL only.
+    // Coupons never change shipping, and the free-shipping threshold uses the
+    // same pre-discount subtotal that the cart and checkout display, so the
+    // estimate and the final charge cannot disagree.
     const shippingCost = toDecimal(
       calculateShippingCost(
-        discountedSubtotal.toNumber(),
+        subtotal.toNumber(),
         env.SHIPPING_FLAT_RATE,
         env.FREE_SHIPPING_THRESHOLD,
       ),
@@ -507,7 +520,7 @@ export const checkout = async (
     }
 
     return createdOrder;
-  });
+  }, { maxWait: 10_000, timeout: 20_000 });
 
   return toOrderResponse(order);
 };
@@ -642,6 +655,41 @@ interface CashCollectionOptions {
   automatic?: boolean;
 }
 
+interface CashCollectionResult {
+  transactionId: string;
+  collectionNote: string;
+  /** Returned so the audit write can happen after the transaction commits. */
+  auditInput?: AuditInput;
+}
+
+interface ProductNumberSource {
+  orderNumber: string;
+  items: Array<{
+    id: string;
+    sku: string | null;
+    productId: string | null;
+    quantity: number;
+  }>;
+}
+
+const buildProductNumber = (
+  order: ProductNumberSource,
+): { value: string; itemCount: number } => {
+  const firstItem = order.items[0];
+  const itemCount = order.items.reduce(
+    (total, item) => total + item.quantity,
+    0,
+  );
+  const code =
+    firstItem?.sku?.trim() || firstItem?.productId || firstItem?.id || order.orderNumber;
+  const value =
+    order.items.length > 1
+      ? `${code} (+${order.items.length - 1} more)`
+      : `${code}${itemCount > 1 ? ` x${itemCount}` : ""}`;
+
+  return { value, itemCount };
+};
+
 const buildCollectionNote = (
   order: OrderRecord,
   transactionId: string,
@@ -656,11 +704,13 @@ const buildCollectionNote = (
     order.items
       .map((item) => `${item.productName} × ${item.quantity}`)
       .join(", ") || "No items";
+  const productNumber = buildProductNumber(order);
 
   return [
     `Order Code: ${order.orderNumber}`,
     `Transaction Number: ${transactionId}`,
     `Customer Name: ${customerName}`,
+    `Product Number: ${productNumber.value} (${productNumber.itemCount} item(s))`,
     `Product Name(s): ${productNames}`,
     `Amount: ${amount.toFixed(2)} ${env.STORE_CURRENCY}`,
     "Status: Collected",
@@ -673,23 +723,19 @@ const buildCollectionNote = (
 };
 
 /**
- * Records a COD cash collection and its income ledger entry inside an existing
- * transaction. Safe to call both from the manual collection endpoint and from
- * the DELIVERED status transition; a PAID payment is a no-op.
+ * Records a cash collection and its income ledger entry inside an existing
+ * transaction. Any payment method can be settled from the Cash Collection
+ * screen, but cancelled/returned orders and cancelled/refunded payments are
+ * always rejected. A PAID payment is a no-op so one-click double clicks cannot
+ * post duplicate income.
  */
 const recordCashCollection = async (
   tx: TxClient,
   order: OrderRecord,
   options: CashCollectionOptions = {},
-): Promise<{ transactionId: string; collectionNote: string } | null> => {
+): Promise<CashCollectionResult | null> => {
   if (!order.payment) {
     throw ApiError.notFound("Order payment not found");
-  }
-
-  if (order.payment.method !== PaymentMethod.CASH_ON_DELIVERY) {
-    throw ApiError.badRequest(
-      "Cash collection can only be recorded for cash-on-delivery orders",
-    );
   }
 
   if (
@@ -697,7 +743,7 @@ const recordCashCollection = async (
     order.status === OrderStatus.RETURNED
   ) {
     throw ApiError.conflict(
-      `Cannot record cash for a ${order.status.toLowerCase()} order`,
+      `Cannot collect cash for a ${order.status.toLowerCase()} order`,
     );
   }
 
@@ -709,11 +755,15 @@ const recordCashCollection = async (
     throw ApiError.conflict("Refunded payments cannot be collected");
   }
 
+  if (order.payment.status === PaymentStatus.CANCELLED) {
+    throw ApiError.conflict("Cancelled payments cannot be collected");
+  }
+
   const collectedAt = new Date();
   const transactionId =
     options.reference?.trim() ||
     order.payment.transactionId ||
-    generateTransactionId(PaymentMethod.CASH_ON_DELIVERY);
+    generateTransactionId(order.payment.method);
   const collectorName = options.actor?.name ?? "System (automatic)";
   const collectionNote = buildCollectionNote(
     order,
@@ -778,11 +828,13 @@ const recordCashCollection = async (
     order.id,
   );
 
-  if (options.actor) {
-    await recordAudit(
-      {
+  const auditInput: AuditInput | undefined = options.actor
+    ? {
         userId: options.actor.id,
-        action: "COLLECT_COD_PAYMENT",
+        action:
+          order.payment.method === PaymentMethod.CASH_ON_DELIVERY
+            ? "COLLECT_COD_PAYMENT"
+            : "COLLECT_CASH_PAYMENT",
         entity: "Order",
         entityId: order.id,
         description: `Recorded cash collection for order ${order.orderNumber}`,
@@ -799,12 +851,10 @@ const recordCashCollection = async (
           collectionNote,
         },
         ipAddress: options.ipAddress,
-      },
-      tx,
-    );
-  }
+      }
+    : undefined;
 
-  return { transactionId, collectionNote };
+  return { transactionId, collectionNote, auditInput };
 };
 
 const applyStatusChange = async (
@@ -870,13 +920,21 @@ const applyStatusChange = async (
           },
           tx,
         );
-      } else if (
-        order.payment.status === PaymentStatus.PENDING ||
-        order.payment.status === PaymentStatus.PROCESSING
-      ) {
+      } else {
+        // Any uncollected payment becomes non-collectable when the order is
+        // cancelled or returned, including FAILED/PROCESSING payments. The
+        // explicit note keeps the audit trail obvious in the cash list.
         await tx.payment.update({
           where: { id: order.payment.id },
-          data: { status: PaymentStatus.CANCELLED },
+          data: {
+            status: PaymentStatus.CANCELLED,
+            collectionNote: [
+              order.payment.collectionNote,
+              `Status: Cancelled — not collectable (order ${nextStatus.toLowerCase()})`,
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          },
         });
         nextPaymentStatus = PaymentStatus.CANCELLED;
       }
@@ -929,26 +987,32 @@ export const updateOrderStatus = async (
   input: UpdateOrderStatusInput,
   ipAddress?: string,
 ): Promise<OrderResponse> => {
-  const updatedOrder = await prisma.$transaction(async (tx) => {
-    await lockOrderRow(tx, orderId);
+  // Audit is deliberately written after commit. Keeping the audit INSERT inside
+  // the interactive transaction made long status changes (stock restore,
+  // ledger entries, notifications) hit Prisma's 5 s timeout, so the status
+  // update rolled back even though the work was otherwise complete.
+  const pendingAudit: { input?: AuditInput } = {};
 
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-      include: orderInclude,
-    });
+  const updatedOrder = await prisma.$transaction(
+    async (tx) => {
+      await lockOrderRow(tx, orderId);
 
-    if (!order) {
-      throw ApiError.notFound("Order not found");
-    }
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        include: orderInclude,
+      });
 
-    if (order.status === input.status) {
-      return order;
-    }
+      if (!order) {
+        throw ApiError.notFound("Order not found");
+      }
 
-    const result = await applyStatusChange(tx, order, input.status);
+      if (order.status === input.status) {
+        return order;
+      }
 
-    await recordAudit(
-      {
+      const result = await applyStatusChange(tx, order, input.status);
+
+      pendingAudit.input = {
         userId: actor.id,
         action: "UPDATE_ORDER_STATUS",
         entity: "Order",
@@ -957,12 +1021,16 @@ export const updateOrderStatus = async (
         oldData: { status: order.status },
         newData: { status: input.status },
         ipAddress,
-      },
-      tx,
-    );
+      };
 
-    return result;
-  });
+      return result;
+    },
+    { maxWait: 10_000, timeout: 20_000 },
+  );
+
+  if (pendingAudit.input) {
+    await recordAuditBestEffort(pendingAudit.input);
+  }
 
   return toOrderResponse(updatedOrder);
 };
@@ -973,38 +1041,226 @@ export const collectCashOnDeliveryPayment = async (
   input: CollectCodPaymentInput,
   ipAddress?: string,
 ): Promise<OrderResponse> => {
-  const updatedOrder = await prisma.$transaction(async (tx) => {
-    await lockOrderRow(tx, orderId);
+  const pendingAudit: { input?: AuditInput } = {};
 
-    const order = await tx.order.findUnique({
-      where: { id: orderId },
-      include: orderInclude,
-    });
+  const updatedOrder = await prisma.$transaction(
+    async (tx) => {
+      await lockOrderRow(tx, orderId);
 
-    if (!order) {
-      throw ApiError.notFound("Order not found");
-    }
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
+        include: orderInclude,
+      });
 
-    await recordCashCollection(tx, order, {
-      actor,
-      note: input.note,
-      reference: input.reference,
-      ipAddress,
-    });
+      if (!order) {
+        throw ApiError.notFound("Order not found");
+      }
 
-    const refreshed = await tx.order.findUnique({
-      where: { id: order.id },
-      include: orderInclude,
-    });
+      const collection = await recordCashCollection(tx, order, {
+        actor,
+        note: input.note,
+        reference: input.reference,
+        ipAddress,
+      });
+      pendingAudit.input = collection?.auditInput;
 
-    if (!refreshed) {
-      throw ApiError.notFound("Order not found");
-    }
+      const refreshed = await tx.order.findUnique({
+        where: { id: order.id },
+        include: orderInclude,
+      });
 
-    return refreshed;
-  });
+      if (!refreshed) {
+        throw ApiError.notFound("Order not found");
+      }
+
+      return refreshed;
+    },
+    { maxWait: 10_000, timeout: 20_000 },
+  );
+
+  if (pendingAudit.input) {
+    await recordAuditBestEffort(pendingAudit.input);
+  }
 
   return toOrderResponse(updatedOrder);
+};
+
+const deriveCashCollectionStatus = (
+  order: OrderResponse,
+): CashCollectionStatus => {
+  if (
+    order.status === OrderStatus.CANCELLED ||
+    order.status === OrderStatus.RETURNED
+  ) {
+    return "CANCELLED";
+  }
+
+  const paymentStatus = order.payment?.status;
+
+  if (
+    !paymentStatus ||
+    paymentStatus === PaymentStatus.CANCELLED ||
+    paymentStatus === PaymentStatus.REFUNDED
+  ) {
+    return "CANCELLED";
+  }
+
+  if (paymentStatus === PaymentStatus.PAID || order.payment?.collectedAt) {
+    return "COLLECTED";
+  }
+
+  return "PENDING";
+};
+
+const toCashCollectionItem = (order: OrderResponse): CashCollectionItem => {
+  const productNumber = buildProductNumber(order);
+  const customerName =
+    order.address?.fullName?.trim() || order.customer?.name || "Customer";
+
+  return {
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    customerName,
+    productNumber: productNumber.value,
+    itemCount: productNumber.itemCount,
+    status: deriveCashCollectionStatus(order),
+    amount: order.payment?.amount ?? order.totalAmount,
+    currency: env.STORE_CURRENCY,
+    paymentMethod: order.paymentMethod,
+    orderStatus: order.status,
+    transactionId: order.payment?.transactionId ?? null,
+    collectedAt: order.payment?.collectedAt ?? null,
+    collectedByName: order.payment?.collectedByName ?? null,
+    createdAt: order.createdAt,
+  };
+};
+
+const cashCollectionStatusWhere = (
+  status: CashCollectionStatus,
+): Prisma.OrderWhereInput => {
+  switch (status) {
+    case "COLLECTED":
+      return {
+        status: { notIn: [OrderStatus.CANCELLED, OrderStatus.RETURNED] },
+        payment: { is: { status: PaymentStatus.PAID } },
+      };
+    case "CANCELLED":
+      return {
+        OR: [
+          { status: { in: [OrderStatus.CANCELLED, OrderStatus.RETURNED] } },
+          {
+            payment: {
+              is: {
+                status: { in: [PaymentStatus.CANCELLED, PaymentStatus.REFUNDED] },
+              },
+            },
+          },
+        ],
+      };
+    case "PENDING":
+    default:
+      return {
+        status: { notIn: [OrderStatus.CANCELLED, OrderStatus.RETURNED] },
+        payment: {
+          is: {
+            status: {
+              in: [PaymentStatus.PENDING, PaymentStatus.PROCESSING, PaymentStatus.FAILED],
+            },
+            collectedAt: null,
+          },
+        },
+      };
+  }
+};
+
+const cashCollectionSearchWhere = (search?: string): Prisma.OrderWhereInput => {
+  const term = search?.trim();
+
+  if (!term) {
+    return {};
+  }
+
+  return {
+    OR: [
+      { orderNumber: { contains: term, mode: "insensitive" } },
+      { user: { name: { contains: term, mode: "insensitive" } } },
+      { user: { email: { contains: term, mode: "insensitive" } } },
+      {
+        payment: {
+          is: { transactionId: { contains: term, mode: "insensitive" } },
+        },
+      },
+    ],
+  };
+};
+
+export const listCashCollections = async (
+  query: CashCollectionListQuery,
+): Promise<PaginatedCashCollections> => {
+  const searchWhere = cashCollectionSearchWhere(query.search);
+  const scopedWhere = (status: CashCollectionStatus): Prisma.OrderWhereInput => ({
+    AND: [searchWhere, cashCollectionStatusWhere(status)],
+  });
+
+  const statusWhere = query.status
+    ? scopedWhere(query.status)
+    : ({} satisfies Prisma.OrderWhereInput);
+
+  const [orders, total, pendingCount, collectedCount, cancelledCount, pendingAmount, collectedAmount] =
+    await Promise.all([
+      prisma.order.findMany({
+        where: statusWhere,
+        include: orderInclude,
+        orderBy: { createdAt: "desc" },
+        skip: (query.page - 1) * query.limit,
+        take: query.limit,
+      }),
+      prisma.order.count({ where: statusWhere }),
+      prisma.order.count({ where: scopedWhere("PENDING") }),
+      prisma.order.count({ where: scopedWhere("COLLECTED") }),
+      prisma.order.count({ where: scopedWhere("CANCELLED") }),
+      prisma.payment.aggregate({
+        _sum: { amount: true },
+        where: { order: { is: scopedWhere("PENDING") } },
+      }),
+      prisma.payment.aggregate({
+        _sum: { amount: true },
+        where: { order: { is: scopedWhere("COLLECTED") } },
+      }),
+    ]);
+
+  const summary: CashCollectionSummary = {
+    pendingCount,
+    collectedCount,
+    cancelledCount,
+    pendingAmount: pendingAmount._sum.amount?.toNumber() ?? 0,
+    collectedAmount: collectedAmount._sum.amount?.toNumber() ?? 0,
+  };
+
+  return {
+    items: orders.map((order) => toCashCollectionItem(toOrderResponse(order))),
+    meta: buildPaginationMeta(query.page, query.limit, total),
+    summary,
+  };
+};
+
+/**
+ * One-click collection. No note/reference is required: this simply marks the
+ * order's payment as collected using the existing audited ledger flow.
+ */
+export const collectCashForOrder = async (
+  actor: AuthenticatedUser,
+  orderId: string,
+  ipAddress?: string,
+): Promise<CashCollectionItem> => {
+  const order = await collectCashOnDeliveryPayment(
+    actor,
+    orderId,
+    {},
+    ipAddress,
+  );
+
+  return toCashCollectionItem(order);
 };
 
 const TRACKING_STEPS: Array<{ status: OrderStatus; label: string; description: string }> = [
@@ -1150,7 +1406,7 @@ export const cancelOrder = async (
     }
 
     return applyStatusChange(tx, order, OrderStatus.CANCELLED);
-  });
+  }, { maxWait: 10_000, timeout: 20_000 });
 
   return toOrderResponse(updatedOrder);
 };
@@ -1275,7 +1531,7 @@ export const confirmPaymentForOrder = async (
     );
 
     return refreshed;
-  });
+  }, { maxWait: 10_000, timeout: 20_000 });
 
   return toOrderResponse(updatedOrder);
 };
@@ -1357,7 +1613,7 @@ export const markPaymentFailedForOrder = async (
     }
 
     return refreshed;
-  });
+  }, { maxWait: 10_000, timeout: 20_000 });
 
   return toOrderResponse(updatedOrder);
 };

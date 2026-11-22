@@ -20,6 +20,11 @@ const DEFAULT_TOGGLES = {
   showBrands: true,
   showPromoBanners: true,
   showNewsletter: true,
+  // Payment switches default ON so existing stores keep their current methods.
+  codEnabled: true,
+  bkashEnabled: true,
+  nagadEnabled: true,
+  stripeEnabled: true,
 } as const;
 
 const settingsInclude = {
@@ -66,6 +71,10 @@ const toSettingsResponse = (settings: SettingsRecord): SettingsResponse => ({
   showBrands: settings.showBrands,
   showPromoBanners: settings.showPromoBanners,
   showNewsletter: settings.showNewsletter,
+  codEnabled: settings.codEnabled,
+  bkashEnabled: settings.bkashEnabled,
+  nagadEnabled: settings.nagadEnabled,
+  stripeEnabled: settings.stripeEnabled,
   categorySections: settings.categorySections.map((section) => ({
     id: section.id,
     categoryId: section.categoryId,
@@ -133,6 +142,18 @@ export const updateSettings = async (
   }
   if (input.showNewsletter !== undefined) {
     data.showNewsletter = input.showNewsletter;
+  }
+  if (input.codEnabled !== undefined) {
+    data.codEnabled = input.codEnabled;
+  }
+  if (input.bkashEnabled !== undefined) {
+    data.bkashEnabled = input.bkashEnabled;
+  }
+  if (input.nagadEnabled !== undefined) {
+    data.nagadEnabled = input.nagadEnabled;
+  }
+  if (input.stripeEnabled !== undefined) {
+    data.stripeEnabled = input.stripeEnabled;
   }
 
   const updated = await prisma.$transaction(async (tx) => {

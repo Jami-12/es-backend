@@ -1,341 +1,172 @@
-# 3D E-Commerce API
+# E-Commerce API (`server`)
 
-Node.js, TypeScript, Express, Prisma and PostgreSQL backend for the 3D commerce store.
+Express + TypeScript + Prisma backend for the Store/JAMI commerce platform. It serves the public storefront, customer account actions, admin console, and super-admin back office from a single API mounted at `/api/v1`.
 
-## Security First
+---
 
-- Never commit `.env`, private keys, PEM files, database URLs or provider credentials.
-- `.env`, `.env.*`, `*.key`, `*.pem`, `*.crt`, `*.p12` and `*.pfx` are ignored by git.
-- Only `.env.example` is committed. It contains placeholders, never real values.
-- If credentials were ever exposed, treat them as compromised and rotate them:
-  - PostgreSQL password / database URL
-  - `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET`
-  - Google OAuth client secret
-  - bKash app key, app secret, username and password
-  - Nagad merchant credentials and RSA key pair
-  - Stripe secret key and webhook secret
-  - Cloudinary API key and API secret
-  - Super-admin password
-- Online payment providers and Cloudinary are disabled by default. Enable each one only after its credentials have been rotated and verified.
+## 1. Requirements
 
-## Requirements
+- Node.js `22.x` (pinned in `engines.node`)
+- npm (`package-lock.json`)
+- PostgreSQL; Prisma `6.19.3`
+- Optional providers: Cloudinary, SMTP, Google OAuth, bKash, Nagad, Stripe
 
-- Node.js 24 (matches `engines.node` and the Vercel runtime)
-- npm
-- PostgreSQL database (local or hosted)
+No OpenAI, AI SDK, or other AI package is used by this server.
 
-## Installation
+## 2. Setup
 
 ```bash
+# from D:\E commerce Shop\server
 npm install
-npx prisma generate
-npx prisma migrate dev --name init
+cp .env.example .env
+npm run prisma:validate
+npm run prisma:generate
+npm run prisma:migrate      # first run / schema changes
+npm run db:seed             # optional super-admin and demo data
 npm run dev
 ```
 
-The API starts on `http://localhost:4000` by default.
+The API listens on `http://localhost:4000` by default. Public roots: `GET /`, `GET /health`, `GET /health/ready`, and `GET /api/v1` (endpoint index).
 
-To create the initial super-admin and sample catalog data:
+### Scripts
 
-```bash
-npm run db:seed
-```
-
-`npm run db:seed` requires a strong `SUPER_ADMIN_PASSWORD`. It does not overwrite an existing super-admin password unless `SEED_RESET_SUPER_ADMIN_PASSWORD=true`.
-
-## Environment Setup
-
-Create your local environment file:
-
-```bash
-cp .env.example .env
-```
-
-On Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Fill in real values in `.env`. Never put real values in `.env.example`, README files, source code or chat messages.
-
-### Vercel Deployment
-
-Vercel's zero-configuration Express support detects `src/app.ts` and deploys its default-exported Express app as one serverless function. It forwards `/`, `/health` and `/api/v1/*` without a catch-all rewrite, so Express receives and matches the original paths.
-
-The port listener in `src/server.ts` is only used for local/container runs. `npm run build` emits ESM `dist/server.js` and CommonJS `dist/server.cjs`; `npm start` runs the ESM entrypoint, and package imports select the appropriate format.
-
-- Set the project Root Directory to `server` if the monorepo root is selected.
-- `vercel.json` sets `outputDirectory` to `null` for automatic detection instead of looking for a static `public` directory. If the Dashboard still overrides this, clear the Output Directory override.
-- `postinstall` runs `prisma generate`, so the Prisma client is ready for Vercel's function bundler.
-- The pinned Prisma and esbuild dependency install scripts required for generation/build are explicitly allow-listed in `package.json`.
-- Add the same environment variables from `.env.example` in the Vercel dashboard. `.env` is not deployed.
-- `CORS_ORIGIN` must contain the deployed frontend origin, or `*` when credentials are not used.
-- `engines.node` pins Vercel to Node.js `24.x`; keep it aligned with the version used locally.
-- Prisma clients are cached on `globalThis` so warm serverless invocations reuse one connection pool.
-
-### Required Variables
-
-| Variable | Description |
+| Command | Description |
 | --- | --- |
-| `NODE_ENV` | `development`, `test` or `production` |
-| `PORT` | HTTP port, for example `4000` |
-| `DATABASE_URL` | PostgreSQL URL in Prisma format |
-| `JWT_ACCESS_SECRET` | Random secret, at least 32 characters |
-| `JWT_ACCESS_EXPIRES_IN` | Access-token duration, for example `15m` or `7d` |
-| `JWT_REFRESH_SECRET` | Different random secret, at least 32 characters |
-| `JWT_REFRESH_EXPIRES_IN` | Refresh-token duration, for example `30d` |
-| `BCRYPT_SALT_ROUNDS` | Integer from 10 to 15; use `12` |
-| `FRONTEND_URL` | Frontend origin, for example `http://localhost:3000` |
-| `SUPER_ADMIN_PASSWORD` | Strong password, at least 12 characters, not a placeholder |
+| `npm run dev` | `tsx watch src/server.ts` |
+| `npm run build` | `tsup` → ESM `dist/server.js` + CJS `dist/server.cjs` |
+| `npm start` | Run the ESM build |
+| `npm run lint` | `tsc -p tsconfig.json --noEmit` |
+| `npm test` | Node test runner suite for gateways and payment/order flows |
+| `npm run prisma:validate` | Validate the Prisma schema |
+| `npm run prisma:generate` | Generate Prisma Client |
+| `npm run prisma:migrate` | `prisma migrate dev` |
+| `npm run prisma:deploy` | `prisma migrate deploy` (production) |
+| `npm run prisma:status` | Migration status |
+| `npm run prisma:studio` | Prisma Studio |
+| `npm run db:push` | `prisma db push` |
+| `npm run db:seed` | Run `prisma/seed.ts` |
 
-`DATABASE_URL` must use the PostgreSQL format:
+Validation used for this project: `npx prisma validate`, `npx prisma generate`, `npm run lint`, `npm run build`.
+
+## 3. Environment variables
+
+Grouped from `.env.example`. `.env` is never deployed; set these in the host/dashboard.
+
+**Core**
+
+`NODE_ENV=development`, `PORT=4000`, `DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/ecommerce_db?schema=public`
+
+**Auth and security**
+
+`JWT_ACCESS_SECRET`, `JWT_ACCESS_EXPIRES_IN=7d`, `JWT_REFRESH_SECRET`, `JWT_REFRESH_EXPIRES_IN=30d`, `BCRYPT_SALT_ROUNDS=12`
+
+**Network**
+
+`FRONTEND_URL=http://localhost:3000`, `CLIENT_URL=http://localhost:3000`, `CORS_ORIGIN=http://localhost:3000`, `PUBLIC_BASE_URL=http://localhost:4000`, `TRUST_PROXY=0`, `RATE_LIMIT_WINDOW_MS=900000`, `RATE_LIMIT_MAX=300`, `AUTH_RATE_LIMIT_MAX=20`
+
+**Store and seed**
+
+`STORE_NAME`, `STORE_ADDRESS`, `STORE_PHONE`, `STORE_EMAIL`, `STORE_CURRENCY=BDT`, `SUPER_ADMIN_NAME`, `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD`, `SEED_RESET_SUPER_ADMIN_PASSWORD=true`
+
+**Email (Nodemailer)**
+
+`SMTP_ENABLED=false`, `SMTP_HOST`, `SMTP_PORT=587`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_SECURE=false`
+
+**Shipping and inventory**
+
+`SHIPPING_FLAT_RATE=60`, `FREE_SHIPPING_THRESHOLD=1000`, `LOW_STOCK_THRESHOLD=5`
+
+**Webhook / OAuth**
+
+`PAYMENT_WEBHOOK_SECRET` (optional, commented in the example), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`, `GOOGLE_SUCCESS_REDIRECT_URL`
+
+**bKash** (tokenized checkout)
+
+`BKASH_ENABLED=false`, `BKASH_BASE_URL`, `BKASH_APP_KEY`, `BKASH_APP_SECRET`, `BKASH_USERNAME`, `BKASH_PASSWORD`, `BKASH_CALLBACK_URL`
+
+`BKASH_CALLBACK_URL` must be a clean absolute URL pointing only to `/api/v1/payments/bkash/callback`, with no query string, hash, trailing slash, or `?orderId=`. If omitted, it is built from `PUBLIC_BASE_URL`. bKash appends `paymentID` and `status` itself; callbacks correlate by `paymentID`.
+
+**Nagad**
+
+`NAGAD_ENABLED=false`, `NAGAD_SIMULATION=false`, `NAGAD_BASE_URL`, `NAGAD_MERCHANT_ID`, `NAGAD_MERCHANT_NUMBER`, `NAGAD_PRIVATE_KEY`, `NAGAD_PUBLIC_KEY`, `NAGAD_CALLBACK_URL`
+
+**Stripe / card**
+
+`STRIPE_ENABLED=false`, `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_CURRENCY=BDT`
+
+**Cloudinary**
+
+`CLOUDINARY_ENABLED=false`, `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER=ecommerce-products`
+
+`VERCEL` is injected by Vercel and must not be set manually. Environment validation fails fast with a descriptive error on invalid or incomplete configuration.
+
+## 4. Architecture
 
 ```text
-postgresql://USER:PASSWORD@HOST:PORT/DATABASE?schema=public
+api/index.ts (Vercel shim) ──> dist/api/index.js (bundled handler) ──> src/app.ts
+src/server.ts              ──> app.listen() only for local/container runs
+src/routes/index.ts    ──> /api/v1 route mounting
+src/modules/*          ──> controllers + services per domain
+prisma/schema.prisma   ──> data model
 ```
 
-URL-encode special characters in the password. For example, `@` becomes `%40`.
+- `src/app.ts` creates the Express app, applies helmet/CORS/rate limiting/logging, mounts `/api/v1`, and exports the app as both named and default export.
+- `src/server.ts` is the only file that calls `app.listen()`; the call sits inside `startServer()` guarded by `if (!env.VERCEL)`.
+- Prisma Client is cached on `globalThis` so warm serverless invocations reuse one connection pool.
+- `src/utils/money.ts` and `src/utils/productPricing.ts` centralize rounding and effective-price resolution; cart, checkout, and coupon validation all use the same helpers.
 
-The `?schema=public` parameter is optional. Omit it if your PostgreSQL host or connection pooler rejects it; the default schema is still `public`.
+## 5. API routes
 
-### Recommended Variables
+All paths below are relative to `/api/v1` unless stated otherwise.
 
-| Variable | Default | Description |
+**Public / auth**: `/auth` (register, login, refresh, forgot-password send-code/verify-code/reset, Google OAuth, `/me`, change-password); `/users/me`; `/categories`, `/brands`, `/products`, `/products/slug/:slug`, `/products/:productId/images`, `/products/:productId/reviews`, `/banners`, `/settings`, `/settings/receipt`, `/orders/track`, `/payments/providers`, `/payments/bkash/*`, `/payments/nagad/*`, `/payments/card/webhook`, `/payments/webhook`, `/coupons/validate`.
+
+**Customer**: `/cart`, `/wishlist`, `/addresses`, `/orders` (checkout, list, receipt, cancel), `/notes`, `/notifications`, `/payments/initiate`, `/payments/card/reconcile`, `/payments/:id/confirm|fail`.
+
+**Admin**: `/admin/orders`, `/admin/cash-collections`, `/admin/customers`, `/admin/users`, `/admin/analytics`, `/admin/audit-logs`, `/admin` (categories/brands/products/images/banners/coupons/reviews/settings/expenses), `/inventory`, `/expenses`, `/investments`, `/employees`, `/salaries`.
+
+**Super-admin**: `/super-admin` user/role management, discounts, settings, data-reset; `/analytics` (overview, revenue, payments, orders, dashboard, inventory, employees, bills, profit-loss); `/accounting` (dashboard, summary, reports, transactions); `/audit`.
+
+Representative endpoints:
+
+| Method | Path | Purpose |
 | --- | --- | --- |
-| `CLIENT_URL` | `FRONTEND_URL` | Used for payment callback redirects |
-| `CORS_ORIGIN` | `FRONTEND_URL` | Comma-separated allowed origins, or `*` |
-| `PUBLIC_BASE_URL` | `http://localhost:PORT` | Public API base URL |
-| `TRUST_PROXY` | `0` | Express trust-proxy setting |
-| `RATE_LIMIT_WINDOW_MS` | `900000` | Global rate-limit window |
-| `RATE_LIMIT_MAX` | `300` | Global requests per window |
-| `AUTH_RATE_LIMIT_MAX` | `20` | Auth requests per window |
-| `STORE_NAME` | `3D Commerce` | Store name for invoices |
-| `STORE_ADDRESS` | `Dhaka, Bangladesh` | Store address |
-| `STORE_PHONE` | `+8801000000000` | Store phone |
-| `STORE_EMAIL` | `support@example.com` | Store email |
-| `STORE_CURRENCY` | `BDT` | Three-letter currency code |
-| `SHIPPING_FLAT_RATE` | `60` | Flat shipping charge |
-| `FREE_SHIPPING_THRESHOLD` | `1000` | Free-shipping order threshold |
-| `LOW_STOCK_THRESHOLD` | `5` | Low-stock warning threshold |
-
-Generate strong secrets with Node.js:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-```
-
-Use a different value for each JWT secret.
-
-### Google OAuth
-
-Set these only if Google login is needed:
-
-```text
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_CALLBACK_URL=http://localhost:4000/api/v1/auth/google/callback
-GOOGLE_SUCCESS_REDIRECT_URL=http://localhost:3000/auth/callback
-```
-
-The callback URL in Google Cloud Console must exactly match `GOOGLE_CALLBACK_URL`.
-
-### bKash
-
-bKash is disabled until `BKASH_ENABLED=true` and all required values are present. Use sandbox credentials issued for bKash Tokenized Checkout; never point a development environment at the production bKash host.
-
-```text
-BKASH_ENABLED=false
-BKASH_BASE_URL=https://tokenized.sandbox.bka.sh/v1.2.0-beta
-BKASH_APP_KEY=
-BKASH_APP_SECRET=
-BKASH_USERNAME=
-BKASH_PASSWORD=
-BKASH_CALLBACK_URL=http://localhost:4000/api/v1/payments/bkash/callback
-```
-
-Startup validation fails if bKash is enabled with missing credentials, or if a non-production environment uses a host other than the official sandbox hosts (`tokenized.sandbox.bka.sh` or `sandbox.bka.sh`).
-
-The callback URL must be reachable by bKash's servers. `http://localhost:4000` only works when bKash can reach it, so use a public HTTPS tunnel (for example ngrok) during local sandbox testing and set `BKASH_CALLBACK_URL` to the tunnel URL.
-
-### Nagad
-
-Nagad is disabled until `NAGAD_ENABLED=true` and all required values are present:
-
-```text
-NAGAD_ENABLED=false
-NAGAD_BASE_URL=http://sandbox.mynagad.com:10080/remote-payment-gateway-1.0/api/dfs
-NAGAD_MERCHANT_ID=
-NAGAD_MERCHANT_NUMBER=
-NAGAD_PRIVATE_KEY=
-NAGAD_PUBLIC_KEY=
-NAGAD_CALLBACK_URL=http://localhost:4000/api/v1/payments/nagad/callback
-```
-
-PEM keys may use `\n` escapes inside a quoted value. Missing or mismatched keys are reported without printing key material. Startup validation fails if Nagad is enabled with missing credentials. The classic sandbox endpoint uses plain HTTP on port 10080 and must be reachable from the server; the callback URL must also be reachable by Nagad.
-
-### Stripe / Card
-
-Stripe is disabled until `STRIPE_ENABLED=true`, a secret key, a publishable key and a webhook secret are present:
-
-```text
-STRIPE_ENABLED=false
-STRIPE_SECRET_KEY=
-STRIPE_PUBLISHABLE_KEY=
-STRIPE_WEBHOOK_SECRET=
-STRIPE_CURRENCY=BDT
-```
-
-`STRIPE_PUBLISHABLE_KEY` is safe to expose to browsers and is returned by `GET /api/v1/payments/providers` so the storefront can initialise Stripe Elements. The secret key is never returned. `STRIPE_CURRENCY` must match `STORE_CURRENCY`, and `STRIPE_WEBHOOK_SECRET` must be the signing secret for the `/api/v1/payments/card/webhook` endpoint.
-
-Card data is handled by Stripe. It never reaches this server.
-
-### Cash on Delivery
-
-Cash on Delivery requires no gateway credentials. The payment stays `PENDING` until an admin marks the order `DELIVERED`, at which point the payment is recorded as `PAID` and the income ledger entry is created.
-
-### Refund handling
-
-Cancelling or returning a paid order marks its payment `REFUNDED`, stores the refunded amount and writes a `SALES_REFUND` ledger entry. This build does **not** call bKash, Nagad or Stripe refund APIs automatically. Issue the actual gateway refund through the provider dashboard (or add and test a provider refund integration) before treating the `REFUNDED` status as proof that funds were returned. Cash-on-delivery refunds are handled manually.
-
-### Cloudinary
-
-Product image uploads are disabled until `CLOUDINARY_ENABLED=true` and all three credentials are present:
-
-```text
-CLOUDINARY_ENABLED=false
-CLOUDINARY_CLOUD_NAME=
-CLOUDINARY_API_KEY=
-CLOUDINARY_API_SECRET=
-CLOUDINARY_FOLDER=ecommerce-products
-```
-
-Existing image URLs continue to display while uploads are disabled.
-
-### Email delivery (Nodemailer)
-
-Forgot-password codes and the super-admin data-reset codes require SMTP. Email delivery is optional: the server starts normally when it is disabled, and the affected endpoints return `503` with a clear message.
-
-```text
-SMTP_ENABLED=false
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASS=
-SMTP_FROM=
-SMTP_SECURE=false
-```
-
-Use `SMTP_PORT=465` with `SMTP_SECURE=true` for implicit TLS, or `587` with `false` for STARTTLS.
-
-## Email-Code Protected Flows
-
-### Forgot password
-
-| Method | Endpoint | Body | Result |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/auth/forgot-password/send-code` | `{ "email": "..." }` | Emails a 6-digit code when the account is eligible; the response is always generic |
-| `POST` | `/api/v1/auth/forgot-password/verify-code` | `{ "email": "...", "code": "123456" }` | Short-lived reset token |
-| `POST` | `/api/v1/auth/forgot-password/reset` | `{ "resetToken": "...", "newPassword": "..." }` or `{ "email": "...", "code": "...", "newPassword": "..." }` | Updates the password and consumes the code |
-
-Codes are stored only as bcrypt hashes, expire after 10 minutes, allow 5 incorrect attempts, and are deleted after a successful reset.
-
-### Super-admin data wipe
-
-All three endpoints require a `SUPER_ADMIN` bearer token. The service also re-checks the current account's role, status and email.
-
-| Method | Endpoint | Body | Result |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/settings/data-reset/request-code` | — | Emails a 6-digit code to the authenticated admin's email |
-| `POST` | `/api/v1/settings/data-reset/verify-code` | `{ "code": "123456" }` | Short-lived verification token that unlocks the final action |
-| `POST` | `/api/v1/settings/data-reset/execute` | `{ "verificationToken": "...", "confirmation": "DELETE ALL DATA" }` | Wipes store data in one Prisma transaction and returns deletion counts |
-
-The wipe removes catalog, orders, payments, coupons, reviews, carts, wishlists, addresses, notifications, finance records, employees and inventory logs. It preserves user accounts (so admins are never locked out), audit logs and the site settings singleton.
-
-## Environment Validation
-
-Environment variables are validated with Zod at startup in `src/config/env.ts`.
-
-The process exits with a clear message when:
-
-- `DATABASE_URL` is missing, malformed, not PostgreSQL, or missing credentials/database name
-- JWT secrets are missing, shorter than 32 characters, or identical
-- JWT expiration values are not valid durations
-- URLs are malformed
-- `CORS_ORIGIN` is not `*` or a comma-separated list of HTTP(S) URLs
-- `BCRYPT_SALT_ROUNDS` is outside 10-15
-- The super-admin password is missing, too short, or a placeholder
-- An enabled payment provider, Cloudinary or SMTP is missing required credentials
-- Google client ID and secret are configured without each other
-
-Payment and Cloudinary credentials are optional while their feature flags are `false`.
-
-## Prisma
-
-Useful commands:
-
-```bash
-npx prisma generate
-npx prisma validate
-npx prisma migrate dev
-npx prisma migrate deploy
-npx prisma migrate status
-npx prisma studio
-npm run db:seed
-```
-
-- Development: run migrations with `npx prisma migrate dev`.
-- Production: apply committed migrations with `npx prisma migrate deploy`.
-- The Prisma client is created once in `src/config/prisma.ts` and reused.
-- Startup fails safely if the database cannot be reached.
-
-## Security Controls
-
-- Helmet security headers
-- CORS allowlist from `CORS_ORIGIN`
-- Global and auth-specific rate limiting
-- Zod request validation
-- JWT access and refresh secrets separated
-- Password hashing with bcrypt
-- Hashed, expiring, attempt-limited email verification codes for sensitive flows
-- Short-lived, purpose-scoped tokens after code verification
-- Role-based authorization for admin and super-admin routes
-- Raw Stripe webhook body handling before JSON parsing
-- Stripe webhook signature and timestamp verification
-- Provider payment amount and order-reference verification
-- Sensitive values redacted from logs and error responses
-- `.env` and key files excluded from git
-
-## Health Checks
-
-- `GET /health`
-- `GET /health/ready`
-- `GET /api/v1/health`
-
-The readiness endpoint checks database connectivity.
-
-## Troubleshooting
-
-### Server exits with `Invalid environment configuration`
-
-Read the listed variable names, update `.env`, and restart. The message never prints secret values.
-
-### `DATABASE_URL is not a valid URL`
-
-Use a plain PostgreSQL URL. Do not paste Markdown links such as `[url](url)`, and do not include escape characters.
-
-### `prisma migrate dev` cannot connect
-
-Check the database host, port, username, password and database name. For hosted databases, confirm SSL settings such as `sslmode=require`.
-
-### Prisma CLI works but the server cannot reach the database
-
-Some hosted PostgreSQL poolers reject the `schema` query parameter. Remove `?schema=public` from `DATABASE_URL` and restart. The default schema remains `public`.
-
-### Payment provider returns 503
-
-The provider is disabled or missing credentials. Rotate the provider credentials, add them to `.env`, set the matching `*_ENABLED` flag to `true`, and restart.
-
-### Product image upload returns 503
-
-Cloudinary is disabled. Rotate the Cloudinary credentials, add them to `.env`, set `CLOUDINARY_ENABLED=true`, and restart.
+| `POST` | `/orders/checkout` | Create order, calculate totals, reserve stock |
+| `GET` | `/orders/:id/receipt` | Receipt with distinct subtotal/discount/shipping/total |
+| `POST` | `/orders/:id/cancel` | Cancel with stock restore and refund ledger entry |
+| `PATCH` | `/admin/orders/:id/collect-payment` | Collect COD payment |
+| `GET` | `/admin/cash-collections` | Dedicated cash collection cards and summary |
+| `PATCH` | `/admin/cash-collections/:id/collect` | One-click collection for any payment method |
+| `GET` | `/accounting/summary` | Financial summary with product vs shipping revenue |
+| `GET` | `/analytics/revenue` | Revenue series excluding cancelled/returned orders |
+
+## 6. Prisma models
+
+`User`, `Note`, `VerificationCode`, `Category`, `Brand`, `Banner`, `SiteSettings`, `HomeCategorySection`, `Product`, `ProductDiscount`, `ProductImage`, `Cart`, `CartItem`, `Wishlist`, `Address`, `Order`, `OrderItem`, `Payment`, `Coupon`, `Review`, `Notification`, `ReceiptSettings`, `AuditLog`, `Expense`, `Investment`, `Employee`, `SalaryPayment`, `FinancialTransaction`, `InventoryLog`
+
+`prisma.config.ts` points to `prisma/schema.prisma`, migrations in `prisma/migrations`, and seed command `tsx prisma/seed.ts`.
+
+## 7. Money and accounting model
+
+- `Order.subtotal` is the **product subtotal only** (sum of line prices after product discounts, before coupons).
+- Coupons discount the product subtotal. Shipping is calculated from the pre-discount product subtotal using `SHIPPING_FLAT_RATE` and `FREE_SHIPPING_THRESHOLD`, so cart estimates, checkout, and the final charge agree.
+- `Order.totalAmount = subtotal − discountAmount + shippingCost + taxAmount` (tax is currently zero). `Payment.amount` equals `totalAmount`.
+- Shipping is never added to product prices, `OrderItem` prices, product subtotals, or product revenue.
+- Every order appears in cash collection; cancelled/returned orders and cancelled/refunded payments are non-collectable. Cash collection amounts use `payment.amount` because that is the cash actually due.
+- Financial summaries expose `revenue.productSales`, `revenue.shipping`, `revenue.sales` (cash collected), and `orders.salesValue` (product-only). Profit margin uses product-only profit and product-only revenue so shipping cannot distort it.
+- Analytics revenue aggregates exclude cancelled and returned orders.
+
+## 8. Vercel deployment
+
+This project uses the standard Express + TypeScript + Prisma serverless setup.
+
+1. Set the Vercel project Root Directory to `server` if deploying from a monorepo root. Leave Output Directory unset (root `.`) so Vercel discovers `api/index.ts` and traces the bundle it imports from `dist/`. If the dashboard sets Output Directory to `dist`, the same build also emits a self-contained `dist/api/index.js` that Vercel can use directly. Either way, `npm run build` produces the function where the runtime expects it.
+2. `vercel.json` uses a modern rewrite: `/(.*)` → `/api/index`. There is no `public` directory requirement and no legacy `builds` override. The function has a 30 s `maxDuration`.
+3. `api/index.ts` is a thin shim that imports `../dist/api/index.js` with an explicit `.js` extension and exports it as both `handler` and `default`. `src/vercel.ts` is the tsup entry that bundles the Express app and all local `src/` imports into `dist/api/index.js`, so Vercel never has to resolve extensionless ESM imports such as `../src/app` at runtime. Express itself is a valid Node request handler, so no serverless adapter is needed. The rewrite preserves the original path, so `/`, `/health`, and `/api/v1/*` still match.
+4. `src/server.ts` owns the only `app.listen()` call, inside `startServer()`, guarded by `if (!env.VERCEL)`. Vercel never imports that file, and there are no `process.exit` calls on the serverless path.
+5. `package.json` uses `"type": "module"` with an exports map (`import` → `dist/server.js`, `require` → `dist/server.cjs`). `tsup` builds ESM and CJS for `node22` from two entries (`src/server.ts` and `src/vercel.ts` → `dist/api/index.js`), inlining local imports while keeping `node_modules` (including `@prisma/client`) external. `tsconfig.json` uses `ESNext`/`bundler` and includes `api/**/*.ts`, so the build has no ESM/CommonJS mismatch.
+6. `postinstall` runs `prisma generate`; Prisma and esbuild install scripts are explicitly allow-listed in `package.json`.
+7. Add all environment variables from `.env.example` in the Vercel dashboard, especially `DATABASE_URL`, JWT secrets, `CORS_ORIGIN` (deployed storefront origin), provider keys, and `PUBLIC_BASE_URL`/`BKASH_CALLBACK_URL` for payment callbacks. `VERCEL` is injected automatically.
+8. Deploy from `server/` with `npm run build && vercel --prod`, or let Vercel run the configured build command.
+
+Prisma clients are cached on `globalThis` for warm invocations; `src/app.ts` trusts one proxy hop on Vercel so rate limiting and audit logs see the real client IP.
