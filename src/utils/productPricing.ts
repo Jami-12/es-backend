@@ -50,6 +50,14 @@ export const calculateDiscountAmount = (
   return toDecimal(Math.min(Math.max(roundMoney(rawAmount), 0), price.toNumber()));
 };
 
+/**
+ * Resolves the price a customer actually pays.
+ *
+ * An admin-controlled `discountPrice` wins when its flag is enabled and the
+ * amount is genuinely lower than the regular price. Otherwise a scheduled
+ * ProductDiscount campaign is used. Disabled or invalid discount prices are
+ * ignored everywhere (cards, cart, checkout, orders and analytics).
+ */
 export const resolveProductPricing = (
   price: Prisma.Decimal,
   discount:
@@ -58,7 +66,32 @@ export const resolveProductPricing = (
       })
     | null,
   at: Date = new Date(),
+  discountPrice?: Prisma.Decimal | null,
+  isDiscountActive = false,
 ): ResolvedProductPricing => {
+  if (
+    isDiscountActive &&
+    discountPrice &&
+    discountPrice.greaterThan(0) &&
+    discountPrice.lessThan(price)
+  ) {
+    const discountAmount = price.minus(discountPrice);
+
+    return {
+      originalPrice: price,
+      discountAmount,
+      finalPrice: discountPrice,
+      discount: {
+        id: null,
+        type: DiscountType.FIXED_AMOUNT,
+        value: discountPrice.toNumber(),
+        amount: discountAmount.toNumber(),
+        startDate: null,
+        endDate: null,
+      },
+    };
+  }
+
   if (discount && isProductDiscountActive(discount, at)) {
     const discountAmount = calculateDiscountAmount(price, discount, at);
 

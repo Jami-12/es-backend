@@ -196,7 +196,13 @@ const toProductResponse = (
   );
   const averageRating =
     reviewCount > 0 ? Math.round((ratingTotal / reviewCount) * 10) / 10 : 0;
-  const pricing = resolveProductPricing(product.price, product.discount);
+  const pricing = resolveProductPricing(
+    product.price,
+    product.discount,
+    new Date(),
+    product.discountPrice,
+    product.isDiscountActive,
+  );
   const thumbnail =
     product.images.find((image) => image.isPrimary)?.imageUrl ??
     product.images[0]?.imageUrl ??
@@ -213,6 +219,7 @@ const toProductResponse = (
     price: product.price.toNumber(),
     originalPrice: pricing.originalPrice.toNumber(),
     discountPrice: product.discountPrice?.toNumber() ?? null,
+    isDiscountActive: product.isDiscountActive,
     discount: pricing.discount,
     sellingPrice: pricing.finalPrice.toNumber(),
     finalPrice: pricing.finalPrice.toNumber(),
@@ -426,6 +433,12 @@ export const createProduct = async (
         input.discountPrice !== undefined && input.discountPrice !== null
           ? toDecimal(input.discountPrice)
           : null,
+      isDiscountActive:
+        Boolean(input.isDiscountActive) &&
+        input.discountPrice !== undefined &&
+        input.discountPrice !== null &&
+        input.discountPrice > 0 &&
+        input.discountPrice < input.price,
       costPrice:
         input.costPrice !== undefined && input.costPrice !== null
           ? toDecimal(input.costPrice)
@@ -499,6 +512,10 @@ export const listProducts = async (
       : { not: ProductStatus.ACTIVE };
   }
 
+  if (query.ids && query.ids.length > 0) {
+    where.id = { in: query.ids };
+  }
+
   if (query.search) {
     where.OR = [
       { title: { contains: query.search, mode: "insensitive" } },
@@ -564,7 +581,13 @@ export const listProducts = async (
     [query.sortBy]: query.sortOrder,
   };
 
-  const skip = (query.page - 1) * query.limit;
+  // A batched id lookup must not be silently truncated by the default page
+  // size; the validation schema caps `ids` at 100 so the effective limit stays
+  // within the same bound.
+  const effectiveLimit = query.ids?.length
+    ? Math.max(query.limit, Math.min(query.ids.length, 100))
+    : query.limit;
+  const skip = (query.page - 1) * effectiveLimit;
 
   const [products, total] = await prisma.$transaction([
     prisma.product.findMany({
@@ -572,14 +595,14 @@ export const listProducts = async (
       include: productInclude,
       orderBy,
       skip,
-      take: query.limit,
+      take: effectiveLimit,
     }),
     prisma.product.count({ where }),
   ]);
 
   return {
     items: products.map((product) => toProductResponse(product, canViewAllStatuses)),
-    meta: buildPaginationMeta(query.page, query.limit, total),
+    meta: buildPaginationMeta(query.page, effectiveLimit, total),
   };
 };
 
@@ -815,6 +838,17 @@ export const updateProduct = async (
   ) {
     throw ApiError.badRequest("Discount price must be lower than the regular price");
   }
+
+  const requestedDiscountActive =
+    input.isDiscountActive !== undefined
+      ? input.isDiscountActive
+      : existing.isDiscountActive;
+  data.isDiscountActive = Boolean(
+    requestedDiscountActive &&
+      finalDiscount !== null &&
+      finalDiscount > 0 &&
+      finalDiscount < finalPrice,
+  );
 
   const product = await prisma.product.update({
     where: { id: productId },

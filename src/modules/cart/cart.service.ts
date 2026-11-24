@@ -2,6 +2,7 @@ import { Prisma, ProductStatus } from "@prisma/client";
 import { prisma } from "../../config/prisma";
 import { ApiError } from "../../utils/ApiError";
 import { roundMoney } from "../../utils/money";
+import { isProductSize } from "../../utils/product-options";
 import { resolveProductPricing } from "../../utils/productPricing";
 import type {
   AddCartItemInput,
@@ -37,6 +38,9 @@ const toCartResponse = (cart: CartRecord): CartResponse => {
     const pricing = resolveProductPricing(
       item.product.price,
       item.product.discount,
+      new Date(),
+      item.product.discountPrice,
+      item.product.isDiscountActive,
     );
     const unitPrice = pricing.finalPrice.toNumber();
     const lineTotal = roundMoney(unitPrice * item.quantity);
@@ -129,6 +133,7 @@ export const addCartItem = async (
       stock: true,
       status: true,
       archivedAt: true,
+      sizes: true,
     },
   });
 
@@ -154,6 +159,20 @@ export const addCartItem = async (
   });
 
   const selectedSize = input.selectedSize?.trim() ?? "";
+  // Legacy or malformed values cannot be selected on the storefront, so they
+  // must not make an otherwise one-size product unpurchasable here either.
+  const availableSizes = Array.isArray(product.sizes)
+    ? product.sizes.filter(
+        (size): size is string => typeof size === "string" && isProductSize(size),
+      )
+    : [];
+
+  if (availableSizes.length > 0 && !availableSizes.includes(selectedSize)) {
+    throw ApiError.badRequest(
+      `Choose a size for "${product.title}" before adding it to your bag`,
+    );
+  }
+
   const selectedColor = input.selectedColor?.trim() ?? "";
   const variantKey = {
     cartId: cart.id,

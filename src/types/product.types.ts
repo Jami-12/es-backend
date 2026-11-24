@@ -39,6 +39,7 @@ export interface CreateProductInput {
   shortDescription?: string | null;
   price: number;
   discountPrice?: number | null;
+  isDiscountActive?: boolean;
   costPrice?: number | null;
   purchasePrice?: number | null;
   stock: number;
@@ -74,6 +75,8 @@ export interface UpdateProductStatusInput {
 export interface ProductListQuery {
   page: number;
   limit: number;
+  /** Batched lookup by product id (max 100). Results follow normal sorting. */
+  ids?: string[];
   search?: string;
   category?: string;
   brand?: string;
@@ -139,6 +142,7 @@ export interface ProductResponse {
   price: number;
   originalPrice: number;
   discountPrice: number | null;
+  isDiscountActive: boolean;
   discount: ProductDiscountResponse | null;
   sellingPrice: number;
   finalPrice: number;

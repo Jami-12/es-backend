@@ -25,6 +25,14 @@ const DEFAULT_TOGGLES = {
   bkashEnabled: true,
   nagadEnabled: true,
   stripeEnabled: true,
+  // Commerce defaults mirror the environment; the dashboard can override them.
+  shippingEnabled: true,
+  shippingFee: env.SHIPPING_FLAT_RATE,
+  freeShippingThreshold: env.FREE_SHIPPING_THRESHOLD,
+  flatDiscountEnabled: false,
+  flatDiscountType: null,
+  flatDiscountValue: 0,
+  flatDiscountMinAmount: null,
 } as const;
 
 const settingsInclude = {
@@ -75,6 +83,13 @@ const toSettingsResponse = (settings: SettingsRecord): SettingsResponse => ({
   bkashEnabled: settings.bkashEnabled,
   nagadEnabled: settings.nagadEnabled,
   stripeEnabled: settings.stripeEnabled,
+  shippingEnabled: settings.shippingEnabled,
+  shippingFee: settings.shippingFee.toNumber(),
+  freeShippingThreshold: settings.freeShippingThreshold.toNumber(),
+  flatDiscountEnabled: settings.flatDiscountEnabled,
+  flatDiscountType: settings.flatDiscountType,
+  flatDiscountValue: settings.flatDiscountValue.toNumber(),
+  flatDiscountMinAmount: settings.flatDiscountMinAmount?.toNumber() ?? null,
   categorySections: settings.categorySections.map((section) => ({
     id: section.id,
     categoryId: section.categoryId,
@@ -154,6 +169,27 @@ export const updateSettings = async (
   }
   if (input.stripeEnabled !== undefined) {
     data.stripeEnabled = input.stripeEnabled;
+  }
+  if (input.shippingEnabled !== undefined) {
+    data.shippingEnabled = input.shippingEnabled;
+  }
+  if (input.shippingFee !== undefined) {
+    data.shippingFee = input.shippingFee;
+  }
+  if (input.freeShippingThreshold !== undefined) {
+    data.freeShippingThreshold = input.freeShippingThreshold;
+  }
+  if (input.flatDiscountEnabled !== undefined) {
+    data.flatDiscountEnabled = input.flatDiscountEnabled;
+  }
+  if (input.flatDiscountType !== undefined) {
+    data.flatDiscountType = input.flatDiscountType;
+  }
+  if (input.flatDiscountValue !== undefined) {
+    data.flatDiscountValue = input.flatDiscountValue;
+  }
+  if (input.flatDiscountMinAmount !== undefined) {
+    data.flatDiscountMinAmount = input.flatDiscountMinAmount;
   }
 
   const updated = await prisma.$transaction(async (tx) => {

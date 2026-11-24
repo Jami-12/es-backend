@@ -29,14 +29,34 @@ const booleanFromEnv = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+/** Some hosts inject quoted values; never let quotes reach URL validation. */
+const stripSurroundingQuotes = (value: unknown): unknown =>
+  typeof value === "string"
+    ? value.trim().replace(/^(["']+)|(["']+)$/g, "").trim()
+    : value;
+
 const optionalString = z.preprocess(
-  emptyToUndefined,
+  (value) => emptyToUndefined(stripSurroundingQuotes(value)),
   z.string().trim().min(1).optional(),
 );
 
 const optionalUrl = z.preprocess(
-  emptyToUndefined,
-  z.string().trim().url("Must be a valid absolute URL").optional(),
+  (value) => emptyToUndefined(stripSurroundingQuotes(value)),
+  z
+    .string()
+    .trim()
+    .url("Must be a valid absolute URL")
+    .refine(
+      (value) => {
+        try {
+          return ["http:", "https:"].includes(new URL(value).protocol);
+        } catch {
+          return false;
+        }
+      },
+      "URL must use http or https",
+    )
+    .optional(),
 );
 
 const jwtExpiry = z
@@ -144,7 +164,7 @@ const corsOriginSchema = z
           return false;
         }
       });
-  }, "CORS_ORIGIN must be *, a comma-separated list of http(s) URLs, or wildcard hosts such as https://*.vercel.app")
+  }, "CORS_ORIGIN must be *, a comma-separated list of http(s) URLs, or wildcard hosts such as *.vercel.app")
   .transform(normalizeCorsOrigins);
 
 const currencySchema = z
@@ -191,7 +211,7 @@ const envSchema = z
     FRONTEND_URL: optionalUrl,
     CLIENT_URL: optionalUrl,
     CORS_ORIGIN: z.preprocess(
-      emptyToUndefined,
+      (value) => emptyToUndefined(stripSurroundingQuotes(value)),
       corsOriginSchema.optional(),
     ),
     PUBLIC_BASE_URL: optionalUrl,
@@ -230,6 +250,16 @@ const envSchema = z
         .optional(),
     ),
     SMTP_SECURE: booleanFromEnv.default(false),
+
+    // Optional order-notification channels. Nothing is contacted unless a
+    // value is configured, so order creation never depends on them.
+    /** Generic webhook plus optional per-channel adapters (SMS, WhatsApp, etc.). */
+    ORDER_NOTIFICATION_WEBHOOK_URL: optionalUrl,
+    ORDER_NOTIFICATION_SMS_WEBHOOK_URL: optionalUrl,
+    ORDER_NOTIFICATION_WHATSAPP_WEBHOOK_URL: optionalUrl,
+    ORDER_NOTIFICATION_TELEGRAM_WEBHOOK_URL: optionalUrl,
+    ORDER_NOTIFICATION_PUSH_WEBHOOK_URL: optionalUrl,
+    ORDER_NOTIFICATION_WEBHOOK_SECRET: optionalString,
 
     SHIPPING_FLAT_RATE: z.coerce.number().min(0).default(60),
     FREE_SHIPPING_THRESHOLD: z.coerce.number().min(0).default(1000),
@@ -357,8 +387,8 @@ const envSchema = z
     // BKASH_CALLBACK_URL is intentionally optional here. payment.config derives
     // a canonical callback from PUBLIC_BASE_URL (the backend's public origin)
     // when it is absent, and reports a clear error if no usable URL can be built.
-    // CLIENT_URL is only the post-callback browser redirect and is never sent
-    // to bKash.
+    // FRONTEND_URL is the post-callback browser redirect; CLIENT_URL is its
+    // legacy alias. Neither is ever sent to bKash.
 
     const nagadSimulation =
       value.NAGAD_ENABLED &&
@@ -386,11 +416,11 @@ const envSchema = z
         "STRIPE_SECRET_KEY",
         value.STRIPE_SECRET_KEY ?? value.CARD_SECRET_KEY,
       ],
-      [
-        "STRIPE_WEBHOOK_SECRET",
-        value.STRIPE_WEBHOOK_SECRET ?? value.CARD_WEBHOOK_SECRET,
-      ],
     ]);
+
+    // STRIPE_WEBHOOK_SECRET is optional: card returns are verified directly
+    // with Stripe, while unsigned webhooks stay disabled with a clear error
+    // until a real signing secret is configured. Never ship a dummy secret.
 
     requireWhenEnabled(value.CLOUDINARY_ENABLED, "Cloudinary", [
       ["CLOUDINARY_CLOUD_NAME", value.CLOUDINARY_CLOUD_NAME],
@@ -475,9 +505,8 @@ if (!parsed.success) {
 const rawEnv = parsed.data;
 
 /**
- * Explicitly configured values only, before the safe localhost fallbacks
- * applied to `env`. URL resolution uses these so it can tell "not configured"
- * apart from a fallback and derive the active Vercel origin correctly.
+ * Explicitly configured values only. URL resolution uses these so it can tell
+ * "not configured" apart from a derived Vercel/request origin.
  */
 export const configuredEnv = rawEnv;
 
@@ -499,12 +528,6 @@ export const env = {
   STRIPE_PUBLISHABLE_KEY: stripePublishableKey,
   STRIPE_WEBHOOK_SECRET: stripeWebhookSecret,
   STRIPE_CURRENCY: rawEnv.STRIPE_CURRENCY ?? rawEnv.CARD_CURRENCY ?? "BDT",
-  CLIENT_URL:
-    rawEnv.CLIENT_URL ?? rawEnv.FRONTEND_URL ?? "http://localhost:3000",
-  CORS_ORIGIN:
-    rawEnv.CORS_ORIGIN ?? rawEnv.FRONTEND_URL ?? "http://localhost:3000",
-  PUBLIC_BASE_URL:
-    rawEnv.PUBLIC_BASE_URL ?? `http://localhost:${rawEnv.PORT}`,
   isProduction: rawEnv.NODE_ENV === "production",
   isDevelopment: rawEnv.NODE_ENV === "development",
   isTest: rawEnv.NODE_ENV === "test",

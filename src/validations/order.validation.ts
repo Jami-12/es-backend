@@ -36,23 +36,65 @@ const emptyToUndefined = (val: unknown): unknown => {
   return val;
 };
 
-export const checkoutSchema = z.object({
-  addressId: z.string().uuid("Invalid address id"),
+const optionalCheckoutText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .nullable()
+    .optional()
+    .transform((value) => (!value || value === "" ? undefined : value));
+
+const checkoutBaseSchema = {
   paymentMethod: paymentMethodSchema,
-  couponCode: z
+  couponCode: optionalCheckoutText(50),
+  notes: optionalCheckoutText(2000),
+};
+
+export const checkoutSchema = z
+  .object({
+    ...checkoutBaseSchema,
+    addressId: z.string().uuid("Invalid address id"),
+  })
+  .strict();
+
+const guestContactSchema = z.object({
+  name: z.string().trim().min(2, "Enter your full name").max(120),
+  phone: z.string().trim().min(6, "Enter a valid phone number").max(30),
+  email: z
+    .union([z.string().trim().email("Enter a valid email address"), z.literal("")])
+    .optional()
+    .transform((value) => (!value ? undefined : value)),
+  addressLine: z.string().trim().min(5, "Enter your delivery address").max(500),
+  division: optionalCheckoutText(120),
+  district: z.string().trim().min(2, "Enter your district").max(120),
+  area: optionalCheckoutText(120),
+  postalCode: optionalCheckoutText(30),
+});
+
+const guestItemSchema = z.object({
+  productId: z.string().uuid("Invalid product id"),
+  quantity: z.coerce.number().int().min(1).max(99),
+  size: optionalCheckoutText(60),
+  color: optionalCheckoutText(60),
+});
+
+export const guestCheckoutSchema = z
+  .object({
+    ...checkoutBaseSchema,
+    guest: z.object({
+      customer: guestContactSchema,
+      items: z.array(guestItemSchema).min(1, "Your bag is empty").max(100),
+    }),
+  })
+  .strict();
+
+export const guestOrderAccessSchema = z.object({
+  guestToken: z
     .string()
     .trim()
-    .max(50)
-    .nullable()
-    .optional()
-    .transform((v) => (!v || v === "" ? undefined : v)),
-  notes: z
-    .string()
-    .trim()
-    .max(2000)
-    .nullable()
-    .optional()
-    .transform((v) => (!v || v === "" ? undefined : v)),
+    .min(20, "Invalid guest order token")
+    .max(80),
 });
 
 export const updateOrderStatusSchema = z.object({

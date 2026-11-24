@@ -429,6 +429,8 @@ export const validateCouponForUser = async (
             product: {
               select: {
                 price: true,
+                discountPrice: true,
+                isDiscountActive: true,
                 discount: true,
               },
             },
@@ -450,6 +452,9 @@ export const validateCouponForUser = async (
         const unitPrice = resolveProductPricing(
           item.product.price,
           item.product.discount,
+          new Date(),
+          item.product.discountPrice,
+          item.product.isDiscountActive,
         ).finalPrice.toNumber();
         return sum + unitPrice * item.quantity;
       }, 0),

@@ -1,6 +1,7 @@
 import { DiscountType, ProductStatus } from "@prisma/client";
 import { z } from "zod";
 
+import { PRODUCT_SIZES } from "../utils/product-options";
 import {
   booleanishSchema,
   emptyToUndefined,
@@ -83,8 +84,8 @@ const parseList = (value: unknown): unknown => {
 const productSizesSchema = z.preprocess(
   parseList,
   z
-    .array(z.string().trim().min(1).max(24))
-    .max(30, "A product can have at most 30 sizes")
+    .array(z.enum(PRODUCT_SIZES))
+    .max(PRODUCT_SIZES.length, "Too many sizes")
     .optional(),
 );
 
@@ -154,6 +155,10 @@ const normalizeProductAliases = (raw: unknown): unknown => {
     value.price = value.sellingPrice;
   }
 
+  if (value.isDiscountActive === undefined && value.discountActive !== undefined) {
+    value.isDiscountActive = value.discountActive;
+  }
+
   if (value.brandId === undefined && value.brand !== undefined) {
     if (value.brand === null) {
       value.brandId = null;
@@ -220,6 +225,7 @@ const productPayloadSchema = z
     shortDescription: z.string().trim().max(500).nullish(),
     price: positiveMoneySchema,
     discountPrice: optionalInputSchema(moneySchema),
+    isDiscountActive: booleanishSchema.optional(),
     costPrice: optionalInputSchema(moneySchema),
     purchasePrice: optionalInputSchema(moneySchema),
     stock: z.coerce
@@ -300,6 +306,7 @@ export const updateProductSchema = z.preprocess(
       shortDescription: z.string().trim().max(500).nullish(),
       price: positiveMoneySchema.optional(),
       discountPrice: optionalInputSchema(moneySchema),
+      isDiscountActive: booleanishSchema.optional(),
       costPrice: optionalInputSchema(moneySchema),
       purchasePrice: optionalInputSchema(moneySchema),
       stock: z.coerce.number().int().min(0).max(10_000_000).optional(),
@@ -373,6 +380,13 @@ export const productListQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),
     limit: z.coerce.number().int().min(1).max(100).default(20),
+    ids: z.preprocess(
+      parseList,
+      z
+        .array(z.string().trim().uuid("Invalid product id"))
+        .max(100, "At most 100 product ids")
+        .optional(),
+    ),
     search: z.string().trim().max(200).optional(),
     category: z.string().trim().max(200).optional(),
     brand: z.string().trim().max(200).optional(),

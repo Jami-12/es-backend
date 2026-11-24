@@ -7,10 +7,10 @@ import { getRequestOriginHints } from "./request-context";
  * Precedence is always:
  *   1. Explicit environment variable (still honoured when provided).
  *   2. Vercel-provided deployment host / incoming request origin.
- *   3. Safe localhost default for development.
  *
- * This avoids stale, hardcoded `.vercel.app` URLs while keeping explicit
- * configuration authoritative.
+ * No host is hardcoded in source. When neither env nor request context can
+ * resolve an origin, callers receive an empty string and report a clear
+ * configuration error instead of silently redirecting to the wrong host.
  */
 
 export interface UrlResolution {
@@ -28,8 +28,26 @@ const clean = (value: string | undefined): string | undefined => {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 };
 
-const joinOrigin = (origin: string, path: string): string =>
-  `${origin.replace(/\/+$/, "")}${path}`;
+const normalizedCallbackWarnings = new Set<string>();
+
+const warnNormalizedCallback = (configured: string, canonical: string): void => {
+  if (configured === canonical || normalizedCallbackWarnings.has(canonical)) {
+    return;
+  }
+
+  normalizedCallbackWarnings.add(canonical);
+  console.warn(
+    "[bkash] configured callback URL was normalized. Register this exact canonical URL with bKash:",
+    { configured, canonical },
+  );
+};
+
+const joinOrigin = (origin: string, path: string): string => {
+  const cleanOrigin = clean(origin);
+  // Never return a bare relative path: consumers treat these as absolute
+  // redirect/callback URLs and a path would silently produce a broken redirect.
+  return cleanOrigin ? `${cleanOrigin.replace(/\/+$/, "")}${path}` : "";
+};
 
 const isVercelHost = (host: string): boolean => {
   const hostname = host.split(":")[0]?.toLowerCase() ?? "";
@@ -68,7 +86,15 @@ export const isSafeFrontendOrigin = (value: string | undefined): value is string
   }
 };
 
-const httpsOriginFromHost = (value: string | undefined): string | undefined => {
+interface OriginFromHostOptions {
+  protocol?: "http" | "https";
+  keepPort?: boolean;
+}
+
+const originFromHost = (
+  value: string | undefined,
+  { protocol = "https", keepPort = false }: OriginFromHostOptions = {},
+): string | undefined => {
   const host = clean(value);
 
   if (!host) {
@@ -77,15 +103,18 @@ const httpsOriginFromHost = (value: string | undefined): string | undefined => {
 
   if (host.includes("://")) {
     try {
-      const parsed = new URL(host);
-      return `${parsed.protocol === "http:" ? "http" : "https"}://${parsed.hostname}`;
+      return new URL(host).origin;
     } catch {
       return undefined;
     }
   }
 
-  const hostname = host.split("/")[0]?.replace(/:\d+$/, "") ?? "";
-  return hostname ? `https://${hostname}` : undefined;
+  const authority = host.split("/")[0] ?? "";
+  if (!authority) {
+    return undefined;
+  }
+
+  return `${protocol}://${keepPort ? authority : authority.replace(/:\d+$/, "")}`;
 };
 
 /** Public HTTPS origin of THIS backend. */
@@ -103,7 +132,7 @@ export const getBackendOrigin = (): string => {
   if (env.VERCEL) {
     const vercelHost =
       clean(configuredEnv.VERCEL_BRANCH_URL) ?? clean(configuredEnv.VERCEL_URL);
-    const derived = httpsOriginFromHost(vercelHost);
+    const derived = originFromHost(vercelHost);
 
     if (derived) {
       return derived;
@@ -113,20 +142,33 @@ export const getBackendOrigin = (): string => {
   const hints = getRequestOriginHints();
   const requestHost = clean(hints?.host);
 
-  if (requestHost && (env.VERCEL || isVercelHost(requestHost))) {
-    const derived = httpsOriginFromHost(requestHost);
-    if (derived) {
-      return derived;
+  if (requestHost) {
+    if (env.VERCEL || isVercelHost(requestHost)) {
+      const derived = originFromHost(requestHost);
+      if (derived) {
+        return derived;
+      }
+    } else if (env.isDevelopment || isLocalHost(requestHost)) {
+      // Local/dev requests carry their real host (and port), so no hardcoded
+      // development URL is needed.
+      const derived = originFromHost(requestHost, {
+        protocol: "http",
+        keepPort: true,
+      });
+      if (derived) {
+        return derived;
+      }
     }
   }
 
-  return `http://localhost:${env.PORT}`;
+  return "";
 };
 
 /** Origin of the Next.js storefront. Never derived from the backend Host. */
 export const getFrontendOrigin = (): string => {
+  // FRONTEND_URL is canonical; CLIENT_URL remains as a legacy alias.
   const explicit =
-    clean(configuredEnv.CLIENT_URL) ?? clean(configuredEnv.FRONTEND_URL);
+    clean(configuredEnv.FRONTEND_URL) ?? clean(configuredEnv.CLIENT_URL);
 
   if (explicit) {
     try {
@@ -137,6 +179,9 @@ export const getFrontendOrigin = (): string => {
   }
 
   const hints = getRequestOriginHints();
+  const corsPatterns = configuredEnv.CORS_ORIGIN
+    ? configuredEnv.CORS_ORIGIN.split(",").map((entry) => entry.trim())
+    : [];
 
   for (const candidate of [hints?.origin, hints?.referer]) {
     const value = clean(candidate);
@@ -147,7 +192,7 @@ export const getFrontendOrigin = (): string => {
 
     try {
       const origin = new URL(value).origin;
-      if (isSafeFrontendOrigin(origin)) {
+      if (isSafeFrontendOrigin(origin) || isOriginAllowed(origin, corsPatterns)) {
         return origin;
       }
     } catch {
@@ -155,7 +200,7 @@ export const getFrontendOrigin = (): string => {
     }
   }
 
-  return "http://localhost:3000";
+  return "";
 };
 
 /** Google's registered redirect_uri for this backend. */
@@ -190,7 +235,9 @@ export const getGoogleSuccessRedirectUrl = (
  * and status itself, so no query string, hash or trailing slash is allowed.
  */
 export const normalizeBkashCallbackUrl = (raw: string): UrlResolution => {
-  const value = raw.trim();
+  // Some hosting providers inject quoted values; strip wrapping quotes before
+  // any validation so a clean URL is never rejected (or sent with quotes).
+  const value = raw.trim().replace(/^(["']+)|(["']+)$/g, "").trim();
 
   if (!value) {
     return { error: "BKASH_CALLBACK_URL is empty" };
@@ -265,7 +312,13 @@ export const resolveBkashCallbackUrl = (): UrlResolution => {
   const configured = clean(configuredEnv.BKASH_CALLBACK_URL);
 
   if (configured) {
-    return normalizeBkashCallbackUrl(configured);
+    const resolution = normalizeBkashCallbackUrl(configured);
+
+    if (resolution.url) {
+      warnNormalizedCallback(configured, resolution.url);
+    }
+
+    return resolution;
   }
 
   const derived = joinOrigin(getBackendOrigin(), BKASH_CALLBACK_PATH);
@@ -278,7 +331,23 @@ export const getBkashCallbackConfigError = (): string | undefined =>
 /** Nagad merchant callback, also derivable from the active backend origin. */
 export const getNagadCallbackUrl = (): string | undefined => {
   const explicit = clean(configuredEnv.NAGAD_CALLBACK_URL);
-  return explicit ?? joinOrigin(getBackendOrigin(), NAGAD_CALLBACK_PATH);
+  const candidate = explicit ?? joinOrigin(getBackendOrigin(), NAGAD_CALLBACK_PATH);
+
+  if (!candidate) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(candidate);
+
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return undefined;
+    }
+
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 };
 
 /** Matches an incoming CORS origin against exact URLs and wildcard hosts. */

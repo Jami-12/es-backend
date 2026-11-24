@@ -27,8 +27,26 @@ export const initiatePaymentSchema = z.object({
   method: z.nativeEnum(PaymentMethod).optional(),
 });
 
+const guestTokenSchema = z
+  .string()
+  .trim()
+  .min(20, "Invalid guest order token")
+  .max(80);
+
 export const createBkashPaymentSchema = z.object({
   orderId: z.string().uuid("Invalid order id"),
+  guestToken: guestTokenSchema.optional(),
+});
+
+export const guestInitiatePaymentSchema = z.object({
+  orderId: z.string().uuid("Invalid order id"),
+  guestToken: guestTokenSchema,
+  method: z.nativeEnum(PaymentMethod).optional(),
+});
+
+export const guestReconcileCardPaymentSchema = z.object({
+  orderId: z.string().uuid("Invalid order id"),
+  guestToken: guestTokenSchema,
 });
 
 export const reconcileCardPaymentSchema = z.object({

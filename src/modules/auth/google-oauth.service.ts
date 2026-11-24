@@ -188,12 +188,35 @@ export const exchangeCodeForProfile = async (
   };
 };
 
+const requireGoogleSuccessRedirectUrl = (frontendOrigin?: string): string => {
+  const base = getGoogleSuccessRedirectUrl(frontendOrigin);
+
+  let absolute = false;
+
+  if (base) {
+    try {
+      absolute = ["http:", "https:"].includes(new URL(base).protocol);
+    } catch {
+      absolute = false;
+    }
+  }
+
+  if (!absolute) {
+    throw new ApiError(
+      503,
+      "GOOGLE_SUCCESS_REDIRECT_URL / FRONTEND_URL is not configured with a valid absolute http(s) URL, so the login redirect cannot be built.",
+    );
+  }
+
+  return base;
+};
+
 export const buildFrontendCallbackUrl = (
   accessToken: string,
   refreshToken: string,
   frontendOrigin?: string,
 ): string => {
-  const base = getGoogleSuccessRedirectUrl(frontendOrigin);
+  const base = requireGoogleSuccessRedirectUrl(frontendOrigin);
   const separator = base.includes("?") ? "&" : "?";
   const params = new URLSearchParams({ accessToken, refreshToken });
 

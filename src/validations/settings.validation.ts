@@ -1,3 +1,4 @@
+import { DiscountType } from "@prisma/client";
 import { z } from "zod";
 
 import { assetUrlSchema, booleanishSchema, emptyToUndefined, nullableTextSchema } from "./helpers";
@@ -45,6 +46,22 @@ const verificationCodeSchema = z
   .trim()
   .regex(/^\d{6}$/, "Verification code must be exactly 6 digits");
 
+const nullableMoneySchema = z.preprocess((value) => {
+  if (value === null || value === "null") {
+    return null;
+  }
+
+  return emptyToUndefined(value);
+}, z.coerce.number().min(0).nullable().optional());
+
+const nullableDiscountTypeSchema = z.preprocess((value) => {
+  if (value === null || value === "null") {
+    return null;
+  }
+
+  return emptyToUndefined(value);
+}, z.nativeEnum(DiscountType).nullable().optional());
+
 export const updateSettingsSchema = z
   .object({
     siteName: nullableTextSchema(120, "Site name"),
@@ -62,6 +79,19 @@ export const updateSettingsSchema = z
     bkashEnabled: booleanishSchema.optional(),
     nagadEnabled: booleanishSchema.optional(),
     stripeEnabled: booleanishSchema.optional(),
+    shippingEnabled: booleanishSchema.optional(),
+    shippingFee: z.preprocess(emptyToUndefined, z.coerce.number().min(0).optional()),
+    freeShippingThreshold: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().min(0).optional(),
+    ),
+    flatDiscountEnabled: booleanishSchema.optional(),
+    flatDiscountType: nullableDiscountTypeSchema,
+    flatDiscountValue: z.preprocess(
+      emptyToUndefined,
+      z.coerce.number().min(0).optional(),
+    ),
+    flatDiscountMinAmount: nullableMoneySchema,
     categorySections: z.preprocess(
       parseCategorySections,
       z.array(categorySectionSchema).optional(),
@@ -69,6 +99,31 @@ export const updateSettingsSchema = z
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "At least one setting must be provided for update",
+  })
+  .superRefine((value, ctx) => {
+    if (
+      value.flatDiscountEnabled &&
+      !value.flatDiscountType &&
+      value.flatDiscountType !== null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["flatDiscountType"],
+        message: "Choose percentage or fixed amount for the store-wide discount",
+      });
+    }
+
+    if (
+      value.flatDiscountType === DiscountType.PERCENTAGE &&
+      value.flatDiscountValue !== undefined &&
+      value.flatDiscountValue > 100
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["flatDiscountValue"],
+        message: "Percentage discount cannot exceed 100",
+      });
+    }
   });
 
 export const verifyDataResetCodeSchema = z.object({

@@ -835,6 +835,8 @@ export const initiatePayment = async (
     paymentStatus: initiation.paymentStatus,
     message: initiation.message,
     redirectUrl: initiation.redirectUrl,
+    bkashURL:
+      method === PaymentMethod.BKASH ? (initiation.redirectUrl ?? null) : undefined,
     clientSecret: initiation.clientSecret,
     providerPaymentId: initiation.providerPaymentId ?? null,
   };

@@ -28,7 +28,13 @@ const toWishlistItem = (item: WishlistRecord): WishlistItemResponse => ({
     slug: item.product.slug,
     image: item.product.images[0]?.imageUrl ?? null,
     price: item.product.price.toNumber(),
-    discountPrice: item.product.discountPrice?.toNumber() ?? null,
+    discountPrice:
+      item.product.isDiscountActive &&
+      item.product.discountPrice &&
+      item.product.discountPrice.greaterThan(0) &&
+      item.product.discountPrice.lessThan(item.product.price)
+        ? item.product.discountPrice.toNumber()
+        : null,
     stock: item.product.stock,
     status: item.product.status,
   },

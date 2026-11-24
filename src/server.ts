@@ -1,8 +1,12 @@
 import { app } from "./app";
 import { isCloudinaryConfigured } from "./config/cloudinary";
 import { env } from "./config/env";
-import { paymentProviderStatus } from "./config/payment.config";
+import {
+  isNagadSimulationEnabled,
+  paymentProviderStatus,
+} from "./config/payment.config";
 import { connectDatabase, disconnectDatabase } from "./config/prisma";
+import { validateNagadKeyConfiguration } from "./modules/payment/providers/nagad.provider";
 import { redactValue } from "./utils/redact";
 
 const logConfigurationStatus = (): void => {
@@ -14,6 +18,12 @@ const logConfigurationStatus = (): void => {
   console.log(
     `[config] Cloudinary=${isCloudinaryConfigured ? "on" : "off"}`,
   );
+
+  // Fail fast on a malformed/mismatched Nagad key pair instead of discovering
+  // it on the first customer payment. Simulation never needs live keys.
+  if (env.NAGAD_ENABLED && !isNagadSimulationEnabled()) {
+    validateNagadKeyConfiguration();
+  }
 };
 
 const startServer = async (): Promise<void> => {
@@ -22,7 +32,7 @@ const startServer = async (): Promise<void> => {
 
   const server = app.listen(env.PORT, () => {
     console.log(
-      `[server] 3D E-Commerce API listening on http://localhost:${env.PORT} (${env.NODE_ENV})`,
+      `[server] 3D E-Commerce API listening on port ${env.PORT} (${env.NODE_ENV})`,
     );
   });
 

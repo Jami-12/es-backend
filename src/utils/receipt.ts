@@ -3,6 +3,7 @@ import { PaymentMethod } from "@prisma/client";
 import { env } from "../config/env";
 import { getBackendOrigin } from "../config/origins";
 import { getReceiptSettings } from "../modules/settings/receipt-settings.service";
+import { getSettings } from "../modules/settings/settings.service";
 import type { OrderResponse, ReceiptData } from "../types/order.types";
 
 const TRANSACTION_PREFIXES: Record<PaymentMethod, string> = {
@@ -26,30 +27,35 @@ export const buildReceiptUrl = (orderId: string): string => {
 export const buildReceipt = async (order: OrderResponse): Promise<ReceiptData> => {
   // Settings are read at receipt time so saved branding/toggles apply
   // immediately to both live views and freshly generated PDFs/prints.
-  const settings = await getReceiptSettings();
+  const [receiptSettings, siteSettings] = await Promise.all([
+    getReceiptSettings(),
+    getSettings(),
+  ]);
 
   return {
     receiptNumber: order.receiptNumber ?? order.orderNumber,
     orderNumber: order.orderNumber,
     issuedAt: order.createdAt,
     store: {
-      name: settings.storeName,
-      tagline: settings.tagline,
-      logoUrl: settings.showLogo ? settings.logoUrl : null,
-      footerNote: settings.footerNote ?? "Thank you for shopping with us.",
-      address: settings.contactAddress ?? env.STORE_ADDRESS,
-      phone: settings.contactPhone ?? env.STORE_PHONE,
-      email: settings.contactEmail ?? env.STORE_EMAIL,
+      // Store identity follows the dashboard site settings first, then any
+      // receipt-specific branding, then the server environment default.
+      name: siteSettings.siteName || receiptSettings.storeName || env.STORE_NAME,
+      tagline: receiptSettings.tagline,
+      logoUrl: receiptSettings.showLogo ? receiptSettings.logoUrl : null,
+      footerNote: receiptSettings.footerNote ?? "Thank you for shopping with us.",
+      address: receiptSettings.contactAddress ?? env.STORE_ADDRESS,
+      phone: receiptSettings.contactPhone ?? env.STORE_PHONE,
+      email: receiptSettings.contactEmail ?? env.STORE_EMAIL,
       currency: env.STORE_CURRENCY,
     },
     display: {
-      showLogo: settings.showLogo,
-      showSize: settings.showSize,
-      showColor: settings.showColor,
-      showPaymentMethod: settings.showPaymentMethod,
-      showTransactionId: settings.showTransactionId,
-      showCustomer: settings.showCustomer,
-      showShippingAddress: settings.showShippingAddress,
+      showLogo: receiptSettings.showLogo,
+      showSize: receiptSettings.showSize,
+      showColor: receiptSettings.showColor,
+      showPaymentMethod: receiptSettings.showPaymentMethod,
+      showTransactionId: receiptSettings.showTransactionId,
+      showCustomer: receiptSettings.showCustomer,
+      showShippingAddress: receiptSettings.showShippingAddress,
     },
     customer: order.customer,
     shippingAddress: order.address,

@@ -2,6 +2,8 @@ import { PaymentMethod } from "@prisma/client";
 import type {
   ConfirmPaymentInput,
   FailPaymentInput,
+  GuestInitiatePaymentInput,
+  GuestReconcileCardPaymentInput,
   InitiatePaymentInput,
   PaymentWebhookInput,
 } from "../../types/payment.types";
@@ -9,12 +11,13 @@ import {
   getFrontendOrigin,
   getNagadCallbackUrl,
 } from "../../config/origins";
-import { prisma } from "../../config/prisma";
 import { bkashConfig, isNagadSimulationEnabled } from "../../config/payment.config";
 import { ApiError } from "../../utils/ApiError";
 import { sendSuccess } from "../../utils/ApiResponse";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { getAuthUser } from "../../utils/auth";
+import { safeErrorSummary } from "../../utils/redact";
+import * as orderService from "../order/order.service";
 import { getEffectivePaymentProviderStatus } from "./payment-availability";
 import * as paymentService from "./payment.service";
 
@@ -51,6 +54,53 @@ const escapeHtml = (value: string): string =>
     }
   });
 
+/** Single source for all post-payment browser redirects. */
+const buildFrontendPaymentUrl = (
+  orderId: string | undefined,
+  paymentStatus: string,
+  guest = false,
+): string => {
+  const origin = getFrontendOrigin();
+
+  if (!origin) {
+    throw new ApiError(
+      503,
+      "FRONTEND_URL is not configured, so the payment callback cannot redirect the customer.",
+    );
+  }
+
+  const path = orderId
+    ? `/dashboard/orders/${encodeURIComponent(orderId)}`
+    : "/dashboard/orders";
+  const url = new URL(path, `${origin.replace(/\/+$/, "")}/`);
+  url.searchParams.set("paymentStatus", paymentStatus);
+  // Never put the guest token in a redirect URL. The browser already has it
+  // from checkout; this flag only tells the return page to load it locally.
+  if (guest) url.searchParams.set("guest", "1");
+  return url.toString();
+};
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const callbackOrderId = (data: Record<string, string>): string | undefined =>
+  data.orderId?.trim() ||
+  data.order_id?.trim() ||
+  data.orderID?.trim() ||
+  data.merchantOrderId?.trim() ||
+  undefined;
+
+/** Callback data is untrusted, so only well-formed ids are looked up. */
+const isGuestCallbackOrder = async (orderId: string | undefined): Promise<boolean> => {
+  if (!orderId || !UUID_PATTERN.test(orderId)) return false;
+
+  try {
+    return await orderService.isGuestOrder(orderId);
+  } catch {
+    return false;
+  }
+};
+
 export const getProviderStatus = asyncHandler(async (_req, res) => {
   sendSuccess(res, {
     data: { providers: await getEffectivePaymentProviderStatus() },
@@ -74,8 +124,34 @@ export const initiatePayment = asyncHandler(async (req, res) => {
   });
 });
 
+export const guestInitiatePayment = asyncHandler(async (req, res) => {
+  const { orderId, guestToken, method } = req.body as GuestInitiatePaymentInput;
+  const actor = await orderService.getGuestOrderActor(orderId, guestToken);
+  const result = await paymentService.initiatePayment(actor, orderId, method);
+
+  sendSuccess(res, {
+    statusCode: 201,
+    data: result,
+    message: result.message,
+  });
+});
+
+export const guestReconcileCardPayment = asyncHandler(async (req, res) => {
+  const { orderId, guestToken } = req.body as GuestReconcileCardPaymentInput;
+  const actor = await orderService.getGuestOrderActor(orderId, guestToken);
+  const payment = await paymentService.reconcileCardPayment(actor, orderId);
+
+  sendSuccess(res, {
+    data: { payment },
+    message: "Card payment status reconciled successfully",
+  });
+});
+
 export const createBkashPayment = asyncHandler(async (req, res) => {
   const orderId = (req.body?.orderId || req.query?.orderId) as string | undefined;
+  const guestToken = (req.body?.guestToken || req.query?.guestToken) as
+    | string
+    | undefined;
   if (!orderId) {
     throw ApiError.badRequest("orderId is required");
   }
@@ -94,22 +170,14 @@ export const createBkashPayment = asyncHandler(async (req, res) => {
     );
   }
 
+  // Unauthenticated bKash creation is only allowed for a guest order that
+  // proves possession of the random checkout token.
   let actor = req.user;
   if (!actor) {
-    const order = await prisma.order.findUnique({
-      where: { id: orderId },
-      include: { user: true },
-    });
-    if (!order) {
-      throw ApiError.notFound("Order not found");
+    if (!guestToken) {
+      throw ApiError.unauthorized("A guest order token is required");
     }
-    actor = {
-      id: order.user.id,
-      email: order.user.email,
-      name: order.user.name,
-      role: order.user.role,
-      status: order.user.status,
-    };
+    actor = await orderService.getGuestOrderActor(orderId, guestToken);
   }
 
   const result = await paymentService.initiatePayment(
@@ -118,23 +186,11 @@ export const createBkashPayment = asyncHandler(async (req, res) => {
     PaymentMethod.BKASH,
   );
 
-  const bkashUrl = result.redirectUrl;
-
-  if (
-    req.query.redirect === "true" ||
-    (req.headers.accept && req.headers.accept.includes("text/html"))
-  ) {
-    if (bkashUrl) {
-      res.redirect(bkashUrl);
-      return;
-    }
-  }
-
   sendSuccess(res, {
     statusCode: 201,
     data: {
       ...result,
-      bkashURL: bkashUrl,
+      bkashURL: result.redirectUrl ?? null,
     },
     message: result.message || "bKash checkout URL created successfully",
   });
@@ -145,13 +201,35 @@ export const providerCallback = asyncHandler(async (req, res) => {
     ...toFlatStringRecord(req.query),
     ...toFlatStringRecord(req.body),
   };
+  // Provider callbacks are browser returns (GET or POST). JSON is opt-in only
+  // for API callers that explicitly ask for `?redirect=false`.
+  const wantsJson = req.query.redirect === "false";
+  const orderId = callbackOrderId(callbackData);
 
-  const payment = await paymentService.handleProviderCallback(callbackData);
+  let payment: Awaited<
+    ReturnType<typeof paymentService.handleProviderCallback>
+  >;
+  let guest = false;
 
-  const wantsJson =
-    req.method === "POST" ||
-    req.query.redirect === "false" ||
-    (req.headers.accept ?? "").includes("application/json");
+  try {
+    payment = await paymentService.handleProviderCallback(callbackData);
+    guest = await orderService.isGuestOrder(payment.orderId);
+  } catch (error) {
+    if (wantsJson) {
+      throw error;
+    }
+
+    // Provider callbacks are public browser redirects, including POST form
+    // posts. A failed verification must still return the customer to the
+    // configured storefront with an explicit failure status.
+    console.error("[payments] provider callback failed", {
+      orderId,
+      error: safeErrorSummary(error),
+    });
+    guest = await isGuestCallbackOrder(orderId);
+    res.redirect(buildFrontendPaymentUrl(orderId, "FAILED", guest));
+    return;
+  }
 
   if (wantsJson) {
     sendSuccess(res, {
@@ -161,13 +239,7 @@ export const providerCallback = asyncHandler(async (req, res) => {
     return;
   }
 
-  const redirectUrl = new URL(
-    `/dashboard/orders/${encodeURIComponent(payment.orderId)}`,
-    getFrontendOrigin(),
-  );
-  redirectUrl.searchParams.set("paymentStatus", payment.status);
-
-  res.redirect(redirectUrl.toString());
+  res.redirect(buildFrontendPaymentUrl(payment.orderId, payment.status, guest));
 });
 
 export const cardWebhook = asyncHandler(async (req, res) => {

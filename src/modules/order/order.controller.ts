@@ -5,6 +5,7 @@ import type {
   OrderTrackingQuery,
   UpdateOrderStatusInput,
 } from "../../types/order.types";
+import { ApiError } from "../../utils/ApiError";
 import { sendSuccess } from "../../utils/ApiResponse";
 import { asyncHandler } from "../../utils/asyncHandler";
 import { getAuthUser } from "../../utils/auth";
@@ -31,6 +32,48 @@ export const checkout = asyncHandler(async (req, res) => {
     statusCode: 201,
     data: { order },
     message: "Order placed successfully. Complete payment to confirm it.",
+  });
+});
+
+export const guestCheckout = asyncHandler(async (req, res) => {
+  const order = await orderService.checkout(null, req.body as CheckoutInput);
+
+  sendSuccess(res, {
+    statusCode: 201,
+    data: { order },
+    message: "Order placed successfully. Complete payment to confirm it.",
+  });
+});
+
+const guestTokenFromRequest = (req: { query: unknown }): string => {
+  const { guestToken } = req.query as { guestToken?: unknown };
+  if (typeof guestToken !== "string" || guestToken.trim().length === 0) {
+    throw ApiError.badRequest("A guest order token is required");
+  }
+  return guestToken.trim();
+};
+
+export const getGuestOrder = asyncHandler(async (req, res) => {
+  const order = await orderService.getGuestOrderById(
+    req.params.id,
+    guestTokenFromRequest(req),
+  );
+
+  sendSuccess(res, {
+    data: { order },
+    message: "Order retrieved successfully",
+  });
+});
+
+export const getGuestOrderReceipt = asyncHandler(async (req, res) => {
+  const receipt = await orderService.getGuestOrderReceipt(
+    req.params.id,
+    guestTokenFromRequest(req),
+  );
+
+  sendSuccess(res, {
+    data: { receipt },
+    message: "Order receipt generated successfully",
   });
 });
 

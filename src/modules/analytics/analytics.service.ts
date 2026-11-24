@@ -9,6 +9,7 @@ import {
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
 import { roundMoney } from "../../utils/money";
+import { resolveProductPricing } from "../../utils/productPricing";
 import type {
   AnalyticsOverview,
   DailySalesPoint,
@@ -266,11 +267,35 @@ export const getAnalyticsOverview = async (): Promise<AnalyticsOverview> => {
     prisma.product.count({
       where: { status: ProductStatus.ACTIVE, archivedAt: null },
     }),
-    prisma.productDiscount.count({
+    prisma.product.findMany({
       where: {
-        isActive: true,
-        startDate: { lte: new Date() },
-        endDate: { gte: new Date() },
+        archivedAt: null,
+        OR: [
+          { isDiscountActive: true, discountPrice: { gt: 0 } },
+          {
+            discount: {
+              isActive: true,
+              startDate: { lte: new Date() },
+              endDate: { gte: new Date() },
+            },
+          },
+        ],
+      },
+      select: {
+        id: true,
+        price: true,
+        discountPrice: true,
+        isDiscountActive: true,
+        discount: {
+          select: {
+            id: true,
+            discountType: true,
+            discountValue: true,
+            startDate: true,
+            endDate: true,
+            isActive: true,
+          },
+        },
       },
     }),
     prisma.payment.groupBy({
@@ -306,6 +331,18 @@ export const getAnalyticsOverview = async (): Promise<AnalyticsOverview> => {
     }
   }
 
+  const discountCheckTime = new Date();
+  const discountedProductCount = productsWithActiveDiscounts.filter(
+    (product) =>
+      resolveProductPricing(
+        product.price,
+        product.discount,
+        discountCheckTime,
+        product.discountPrice,
+        product.isDiscountActive,
+      ).discount !== null,
+  ).length;
+
   const roleCounts = new Map<Role, number>();
 
   for (const group of roleGroups) {
@@ -332,7 +369,7 @@ export const getAnalyticsOverview = async (): Promise<AnalyticsOverview> => {
       inactiveUsers,
       products: totalProducts,
       activeProducts,
-      productsWithActiveDiscounts,
+      productsWithActiveDiscounts: discountedProductCount,
     },
     dailySales: Array.from(dailyBuckets.values()),
     monthlySales: Array.from(monthlyBuckets.values()),

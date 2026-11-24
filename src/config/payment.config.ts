@@ -124,8 +124,16 @@ export const isCardConfigured = (): boolean =>
   Boolean(
     env.STRIPE_ENABLED &&
       cardConfig.secretKey &&
-      cardConfig.webhookSecret,
+      cardConfig.publishableKey,
   );
+
+/**
+ * Webhook processing needs a real signing secret. Card checkout and the
+ * verified return flow work without it; unsigned webhooks stay disabled
+ * instead of accepting a dummy secret shipped in the repository.
+ */
+export const isCardWebhookConfigured = (): boolean =>
+  isCardConfigured() && Boolean(cardConfig.webhookSecret);
 
 export const paymentProviderStatus = () => ({
   bkash: isBkashConfigured(),

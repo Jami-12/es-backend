@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
+  DiscountType,
   InventoryMovementType,
   OrderStatus,
   PaymentMethod,
   PaymentStatus,
   Prisma,
   Role,
+  UserStatus,
 } from "@prisma/client";
 import { env } from "../../config/env";
 import { prisma } from "../../config/prisma";
@@ -19,6 +21,7 @@ import {
   toDecimal,
 } from "../../utils/money";
 import { resolveProductPricing } from "../../utils/productPricing";
+import { isProductSize } from "../../utils/product-options";
 import { buildPaginationMeta } from "../../utils/pagination";
 import {
   generateOrderNumber,
@@ -30,10 +33,12 @@ import {
   generateTransactionId,
 } from "../../utils/receipt";
 import { resolveCoupon } from "../coupon/coupon.service";
+import { getSettings } from "../settings/settings.service";
 import {
   notifyCustomerAndAdmins,
   ORDER_PLACED_EVENT,
 } from "../notification/notification-events";
+import { notifyExternalOrderChannels } from "../notification/order-notification.service";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   CashCollectionItem,
@@ -129,6 +134,8 @@ const toOrderResponse = (order: OrderRecord): OrderResponse => ({
   status: order.status,
   paymentStatus: order.paymentStatus,
   paymentMethod: order.paymentMethod,
+  /** Present only for guest orders; clients must store it to access the order. */
+  guestToken: order.guestToken,
   receiptNumber: order.receiptNumber,
   receiptUrl: order.receiptUrl,
   notes: order.notes,
@@ -233,50 +240,224 @@ const lockOrderRow = async (tx: TxClient, orderId: string): Promise<void> => {
   await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
 };
 
+interface CheckoutCommerceSettings {
+  shippingEnabled: boolean;
+  shippingFee: number;
+  freeShippingThreshold: number;
+  flatDiscountEnabled: boolean;
+  flatDiscountType: DiscountType | null;
+  flatDiscountValue: number;
+  flatDiscountMinAmount: number | null;
+}
+
+const getCheckoutCommerceSettings = async (): Promise<CheckoutCommerceSettings> => {
+  const settings = await getSettings();
+
+  return {
+    shippingEnabled: settings.shippingEnabled,
+    shippingFee: settings.shippingFee,
+    freeShippingThreshold: settings.freeShippingThreshold,
+    flatDiscountEnabled: settings.flatDiscountEnabled,
+    flatDiscountType: settings.flatDiscountType,
+    flatDiscountValue: settings.flatDiscountValue,
+    flatDiscountMinAmount: settings.flatDiscountMinAmount,
+  };
+};
+
+/**
+ * Automatic store-wide discount. The optional minimum applies to the product
+ * subtotal, and the result can never exceed that subtotal.
+ */
+const calculateFlatDiscountAmount = (
+  subtotal: Prisma.Decimal,
+  settings: CheckoutCommerceSettings,
+): Prisma.Decimal => {
+  if (
+    !settings.flatDiscountEnabled ||
+    !settings.flatDiscountType ||
+    settings.flatDiscountValue <= 0
+  ) {
+    return toDecimal(0);
+  }
+
+  if (
+    settings.flatDiscountMinAmount !== null &&
+    subtotal.toNumber() < settings.flatDiscountMinAmount
+  ) {
+    return toDecimal(0);
+  }
+
+  const raw =
+    settings.flatDiscountType === DiscountType.PERCENTAGE
+      ? (subtotal.toNumber() * settings.flatDiscountValue) / 100
+      : settings.flatDiscountValue;
+
+  return toDecimal(
+    Math.min(Math.max(roundMoney(raw), 0), Math.max(subtotal.toNumber(), 0)),
+  );
+};
+
+const calculateOrderShippingCost = (
+  subtotal: Prisma.Decimal,
+  settings: CheckoutCommerceSettings,
+): Prisma.Decimal => {
+  if (!settings.shippingEnabled) {
+    return toDecimal(0);
+  }
+
+  return toDecimal(
+    calculateShippingCost(
+      subtotal.toNumber(),
+      settings.shippingFee,
+      settings.freeShippingThreshold,
+    ),
+  );
+};
+
+export const isReceiptableOrder = (
+  order: Pick<OrderResponse, "status" | "paymentStatus" | "paymentMethod">,
+): boolean =>
+  order.paymentStatus === PaymentStatus.PAID ||
+  (order.paymentMethod === PaymentMethod.CASH_ON_DELIVERY &&
+    ([OrderStatus.CONFIRMED, OrderStatus.PROCESSING, OrderStatus.SHIPPED, OrderStatus.DELIVERED] as OrderStatus[]).includes(
+      order.status,
+    ));
+
+const assertReceiptable = (order: OrderResponse): void => {
+  if (!isReceiptableOrder(order)) {
+    throw ApiError.conflict(
+      "Receipt is available only after the order is confirmed or paid",
+    );
+  }
+};
+
 export const checkout = async (
-  userId: string,
+  /** Null for guest checkout; the client sends items and contact details. */
+  userId: string | null,
   input: CheckoutInput,
 ): Promise<OrderResponse> => {
   // Reject a dashboard-disabled method before locking the cart or touching stock.
   await assertPaymentMethodAvailable(input.paymentMethod);
 
+  const commerce = await getCheckoutCommerceSettings();
+  const guestToken = userId === null ? randomUUID() : null;
+
+  const productInclude = {
+    images: {
+      orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }],
+      take: 1,
+    },
+    discount: true,
+  } satisfies Prisma.ProductInclude;
+
+  type CheckoutProduct = Prisma.ProductGetPayload<{
+    include: typeof productInclude;
+  }>;
+  type CheckoutSourceItem = {
+    id: string;
+    product: CheckoutProduct;
+    selectedSize: string | null;
+    selectedColor: string | null;
+    quantity: number;
+  };
+
   const order = await prisma.$transaction(async (tx) => {
-    await lockCartRow(tx, userId);
+    let orderUserId = userId;
+    let address: Prisma.AddressGetPayload<{}>;
+    let sourceItems: CheckoutSourceItem[];
+    const cartItemIds: string[] = [];
 
-    const cart = await tx.cart.findUnique({
-      where: { userId },
-      include: {
-        items: {
-          include: {
-            product: {
-              include: {
-                images: {
-                  orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }],
-                  take: 1,
-                },
-                discount: true,
-              },
-            },
-          },
+    if (userId) {
+      if (!input.addressId) {
+        throw ApiError.badRequest("A delivery address is required");
+      }
+
+      await lockCartRow(tx, userId);
+
+      const cart = await tx.cart.findUnique({
+        where: { userId },
+        include: { items: { include: { product: { include: productInclude } } } },
+      });
+
+      if (!cart || cart.items.length === 0) {
+        throw ApiError.badRequest("Your cart is empty");
+      }
+
+      const existingAddress = await tx.address.findFirst({
+        where: { id: input.addressId, userId },
+      });
+
+      if (!existingAddress) {
+        throw ApiError.notFound("Shipping address not found");
+      }
+
+      address = existingAddress;
+      sourceItems = cart.items.map((item) => ({
+        id: item.id,
+        product: item.product,
+        selectedSize: item.selectedSize,
+        selectedColor: item.selectedColor,
+        quantity: item.quantity,
+      }));
+      cartItemIds.push(...cart.items.map((item) => item.id));
+    } else if (input.guest) {
+      const { customer, items } = input.guest;
+
+      // Guest checkouts use a synthetic customer so all existing order, payment
+      // and notification relations stay intact. The public token is the only
+      // credential needed to view or pay for the order afterwards.
+      const guestUser = await tx.user.create({
+        data: {
+          name: customer.name,
+          email: `guest+${randomUUID()}@guest.local`,
+          phone: customer.phone,
+          role: Role.CUSTOMER,
+          status: UserStatus.ACTIVE,
+          isActive: true,
         },
-      },
-    });
+      });
 
-    if (!cart || cart.items.length === 0) {
-      throw ApiError.badRequest("Your cart is empty");
-    }
+      orderUserId = guestUser.id;
+      address = await tx.address.create({
+        data: {
+          userId: guestUser.id,
+          fullName: customer.name,
+          phone: customer.phone,
+          division: customer.division ?? null,
+          district: customer.district,
+          area: customer.area ?? null,
+          addressLine: customer.addressLine,
+          postalCode: customer.postalCode?.slice(0, 20) ?? null,
+        },
+      });
 
-    const address = await tx.address.findFirst({
-      where: { id: input.addressId, userId },
-    });
+      const products = await tx.product.findMany({
+        where: { id: { in: Array.from(new Set(items.map((item) => item.productId))) } },
+        include: productInclude,
+      });
+      const productById = new Map(products.map((product) => [product.id, product]));
 
-    if (!address) {
-      throw ApiError.notFound("Shipping address not found");
+      sourceItems = items.map((item, index) => {
+        const product = productById.get(item.productId);
+
+        if (!product) {
+          throw ApiError.notFound("One of the selected products is no longer available");
+        }
+
+        return {
+          id: `guest-${index}`,
+          product,
+          selectedSize: item.size ?? null,
+          selectedColor: item.color ?? null,
+          quantity: item.quantity,
+        };
+      });
+    } else {
+      throw ApiError.badRequest("Guest checkout details are required");
     }
 
     let subtotal = new Prisma.Decimal(0);
     let totalProductCost = new Prisma.Decimal(0);
-    const cartItemIds: string[] = [];
     const orderItems: {
       cartItemId: string;
       productId: string;
@@ -297,7 +478,7 @@ export const checkout = async (
       previousStock: number;
     }[] = [];
 
-    for (const item of cart.items) {
+    for (const item of sourceItems) {
       const { product } = item;
 
       if (product.status !== "ACTIVE" || product.archivedAt !== null) {
@@ -312,7 +493,38 @@ export const checkout = async (
         );
       }
 
-      const pricing = resolveProductPricing(product.price, product.discount);
+      // Sizes can be edited after an item enters the cart. Revalidate at
+      // checkout so a removed or legacy size never reaches an order.
+      const selectedSize = item.selectedSize?.trim() || "";
+      const productSizes = Array.isArray(product.sizes)
+        ? product.sizes.filter(
+            (size): size is string => typeof size === "string",
+          )
+        : [];
+
+      if (productSizes.length > 0) {
+        if (
+          !selectedSize ||
+          !isProductSize(selectedSize) ||
+          !productSizes.includes(selectedSize)
+        ) {
+          throw ApiError.badRequest(
+            `Please review the size for "${product.title}" in your cart before checkout.`,
+          );
+        }
+      } else if (selectedSize && !isProductSize(selectedSize)) {
+        throw ApiError.badRequest(
+          `"${product.title}" has an invalid size in your cart. Please remove and add it again.`,
+        );
+      }
+
+      const pricing = resolveProductPricing(
+        product.price,
+        product.discount,
+        new Date(),
+        product.discountPrice,
+        product.isDiscountActive,
+      );
       const unitPrice = pricing.finalPrice;
       const totalPrice = unitPrice.mul(item.quantity);
       const purchasePrice = product.purchasePrice.greaterThan(0)
@@ -330,7 +542,7 @@ export const checkout = async (
         productName: product.title,
         productImage: product.images[0]?.imageUrl ?? null,
         sku: product.sku,
-        size: item.selectedSize || null,
+        size: selectedSize || null,
         color: item.selectedColor || null,
         unitPrice,
         originalPrice: pricing.originalPrice,
@@ -345,34 +557,37 @@ export const checkout = async (
       });
     }
 
-    let discountAmount = new Prisma.Decimal(0);
+    const flatDiscountAmount = calculateFlatDiscountAmount(subtotal, commerce);
+    let couponDiscountAmount = new Prisma.Decimal(0);
     let couponId: string | null = null;
     let couponUsageLimit: number | null = null;
 
     if (input.couponCode) {
+      const couponBase = subtotal.minus(flatDiscountAmount);
       const { coupon, discountAmount: discount } = await resolveCoupon(
         input.couponCode,
-        subtotal.toNumber(),
+        couponBase.toNumber(),
         tx,
       );
 
-      discountAmount = toDecimal(discount);
+      couponDiscountAmount = toDecimal(
+        Math.min(discount, Math.max(couponBase.toNumber(), 0)),
+      );
       couponId = coupon.id;
       couponUsageLimit = coupon.usageLimit;
     }
 
+    // Store-wide and coupon discounts are separate line items but share one
+    // stored total. Neither can reduce the product subtotal below zero.
+    const discountAmount = Prisma.Decimal.min(
+      subtotal,
+      flatDiscountAmount.plus(couponDiscountAmount),
+    );
     const discountedSubtotal = subtotal.minus(discountAmount);
     // Shipping is an order-level charge based on the PRODUCT SUBTOTAL only.
-    // Coupons never change shipping, and the free-shipping threshold uses the
-    // same pre-discount subtotal that the cart and checkout display, so the
-    // estimate and the final charge cannot disagree.
-    const shippingCost = toDecimal(
-      calculateShippingCost(
-        subtotal.toNumber(),
-        env.SHIPPING_FLAT_RATE,
-        env.FREE_SHIPPING_THRESHOLD,
-      ),
-    );
+    // Coupons and store-wide discounts never change shipping, and a disabled
+    // shipping fee always results in a zero charge.
+    const shippingCost = calculateOrderShippingCost(subtotal, commerce);
     const taxAmount = new Prisma.Decimal(0);
     const totalAmount = discountedSubtotal.plus(shippingCost).plus(taxAmount);
     const grossProfit = discountedSubtotal.minus(totalProductCost);
@@ -441,8 +656,11 @@ export const checkout = async (
       data: {
         id: orderId,
         orderNumber,
-        userId,
+        userId: orderUserId!,
         addressId: address.id,
+        guestToken,
+        guestEmail: input.guest?.customer.email ?? null,
+        guestPhone: input.guest?.customer.phone ?? null,
         couponId,
         subtotal,
         discountAmount,
@@ -492,13 +710,15 @@ export const checkout = async (
       include: orderInclude,
     });
 
-    await tx.cartItem.deleteMany({
-      where: { id: { in: cartItemIds } },
-    });
+    if (cartItemIds.length > 0) {
+      await tx.cartItem.deleteMany({
+        where: { id: { in: cartItemIds } },
+      });
+    }
 
     await createNotification(
       tx,
-      userId,
+      orderUserId!,
       "Order placed",
       `Your order ${createdOrder.orderNumber} has been placed successfully.`,
       "ORDER",
@@ -510,7 +730,7 @@ export const checkout = async (
     if (input.paymentMethod === PaymentMethod.CASH_ON_DELIVERY) {
       await createNotification(
         tx,
-        userId,
+        orderUserId!,
         "Order confirmed",
         `Your order ${createdOrder.orderNumber} is confirmed. Payment will be collected on delivery.`,
         "ORDER",
@@ -521,6 +741,26 @@ export const checkout = async (
 
     return createdOrder;
   }, { maxWait: 10_000, timeout: 20_000 });
+
+  // External alerts are intentionally outside the transaction: they are
+  // best-effort and never block or roll back a successful checkout.
+  void notifyExternalOrderChannels({
+    id: order.id,
+    orderNumber: order.orderNumber,
+    totalAmount: order.totalAmount.toNumber(),
+    paymentMethod: order.paymentMethod,
+    createdAt: order.createdAt,
+    guestToken: order.guestToken,
+    user: { name: order.user.name, email: order.user.email },
+    items: order.items.map((item) => ({
+      productName: item.productName,
+      quantity: item.quantity,
+      size: item.size,
+      totalPrice: item.totalPrice.toNumber(),
+    })),
+  }).catch(() => {
+    // notifyExternalOrderChannels already logs per-channel failures.
+  });
 
   return toOrderResponse(order);
 };
@@ -581,10 +821,7 @@ export const listOrders = async (
   };
 };
 
-export const getOrderById = async (
-  requester: AuthenticatedUser,
-  orderId: string,
-): Promise<OrderResponse> => {
+const findOrderRecord = async (orderId: string): Promise<OrderRecord> => {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
     include: orderInclude,
@@ -593,6 +830,15 @@ export const getOrderById = async (
   if (!order) {
     throw ApiError.notFound("Order not found");
   }
+
+  return order;
+};
+
+export const getOrderById = async (
+  requester: AuthenticatedUser,
+  orderId: string,
+): Promise<OrderResponse> => {
+  const order = await findOrderRecord(orderId);
 
   const isOwner = order.userId === requester.id;
   const canManageAllOrders =
@@ -605,11 +851,64 @@ export const getOrderById = async (
   return toOrderResponse(order);
 };
 
+/**
+ * Guest orders have no login credential. The random token returned at checkout
+ * is the only thing that grants post-checkout access to the full order.
+ */
+export const getGuestOrderById = async (
+  orderId: string,
+  guestToken: string,
+): Promise<OrderResponse> => {
+  const order = await findOrderRecord(orderId);
+
+  if (!order.guestToken || order.guestToken !== guestToken.trim()) {
+    throw ApiError.notFound("Order not found");
+  }
+
+  return toOrderResponse(order);
+};
+
+/** Reuses the existing authenticated payment pipeline for guest orders. */
+export const getGuestOrderActor = async (
+  orderId: string,
+  guestToken: string,
+): Promise<AuthenticatedUser> => {
+  const order = await getGuestOrderById(orderId, guestToken);
+
+  return {
+    id: order.userId,
+    name: order.customer.name,
+    email: order.customer.email,
+    role: Role.CUSTOMER,
+    status: UserStatus.ACTIVE,
+  };
+};
+
+/** Used by provider callbacks to mark a return URL as guest-owned, never to reveal the token. */
+export const isGuestOrder = async (orderId: string): Promise<boolean> => {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { guestToken: true },
+  });
+
+  return Boolean(order?.guestToken);
+};
+
 export const getOrderReceipt = async (
   requester: AuthenticatedUser,
   orderId: string,
 ): Promise<ReceiptData> => {
   const order = await getOrderById(requester, orderId);
+  assertReceiptable(order);
+  return buildReceipt(order);
+};
+
+export const getGuestOrderReceipt = async (
+  orderId: string,
+  guestToken: string,
+): Promise<ReceiptData> => {
+  const order = await getGuestOrderById(orderId, guestToken);
+  assertReceiptable(order);
   return buildReceipt(order);
 };
 

@@ -2,7 +2,7 @@ import cors, { type CorsOptions } from "cors";
 import express, { type Request } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
-import { env } from "./config/env";
+import { configuredEnv, env } from "./config/env";
 import { isOriginAllowed } from "./config/origins";
 import { prisma } from "./config/prisma";
 import { runWithRequestOriginHints } from "./config/request-context";
@@ -16,12 +16,18 @@ import { asyncHandler } from "./utils/asyncHandler";
 
 const app = express();
 
-const configuredOrigins = env.CORS_ORIGIN.split(",")
+// CORS_ORIGIN is canonical. When omitted, the configured frontend origin is
+// the only allowed cross-origin caller; no host is hardcoded in source.
+const corsOriginValue =
+  env.CORS_ORIGIN ?? configuredEnv.FRONTEND_URL ?? configuredEnv.CLIENT_URL ?? "";
+
+const configuredOrigins = corsOriginValue
+  .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
 const corsOrigin: CorsOptions["origin"] =
-  env.CORS_ORIGIN === "*"
+  corsOriginValue === "*"
     ? "*"
     : (requestOrigin, callback) => {
         // Preflight requests without an Origin are safe to continue.

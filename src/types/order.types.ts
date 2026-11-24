@@ -5,8 +5,33 @@ import type {
 } from "@prisma/client";
 import type { PaginatedResult } from "./common.types";
 
+export interface GuestCheckoutItemInput {
+  productId: string;
+  quantity: number;
+  size?: string | null;
+  color?: string | null;
+}
+
+export interface GuestCheckoutContactInput {
+  name: string;
+  email?: string | null;
+  phone: string;
+  addressLine: string;
+  division?: string | null;
+  district: string;
+  area?: string | null;
+  postalCode?: string | null;
+}
+
+export interface GuestCheckoutInput {
+  customer: GuestCheckoutContactInput;
+  items: GuestCheckoutItemInput[];
+}
+
 export interface CheckoutInput {
-  addressId: string;
+  /** Required for signed-in checkout; omitted for guest checkout. */
+  addressId?: string;
+  guest?: GuestCheckoutInput;
   paymentMethod: PaymentMethod;
   couponCode?: string;
   notes?: string;
@@ -157,6 +182,8 @@ export interface OrderResponse {
   status: OrderStatus;
   paymentStatus: PaymentStatus;
   paymentMethod: PaymentMethod;
+  /** Present only for guest orders; clients must store it to access the order. */
+  guestToken: string | null;
   receiptNumber: string | null;
   receiptUrl: string | null;
   notes: string | null;

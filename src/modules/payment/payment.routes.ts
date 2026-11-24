@@ -6,7 +6,10 @@ import { validate } from "../../middlewares/validate.middleware";
 import { idParamSchema } from "../../validations/common.validation";
 import {
   confirmPaymentSchema,
+  createBkashPaymentSchema,
   failPaymentSchema,
+  guestInitiatePaymentSchema,
+  guestReconcileCardPaymentSchema,
   initiatePaymentSchema,
   paymentWebhookSchema,
   reconcileCardPaymentSchema,
@@ -25,12 +28,33 @@ router.post(
 
 router.get("/bkash/callback", paymentController.providerCallback);
 router.post("/bkash/callback", paymentController.providerCallback);
-router.post("/bkash/create", paymentController.createBkashPayment);
-router.get("/bkash/create", paymentController.createBkashPayment);
+router.post(
+  "/bkash/create",
+  validate({ body: createBkashPaymentSchema }),
+  paymentController.createBkashPayment,
+);
+router.get(
+  "/bkash/create",
+  validate({ query: createBkashPaymentSchema }),
+  paymentController.createBkashPayment,
+);
 router.get("/nagad/callback", paymentController.providerCallback);
 router.post("/nagad/callback", paymentController.providerCallback);
 router.get("/nagad/simulate", paymentController.nagadSimulationPage);
 router.post("/card/webhook", paymentController.cardWebhook);
+
+// Guest payments are authorised by the random order token instead of a bearer
+// token. These routes must stay above `authenticate`.
+router.post(
+  "/guest/initiate",
+  validate({ body: guestInitiatePaymentSchema }),
+  paymentController.guestInitiatePayment,
+);
+router.post(
+  "/guest/card/reconcile",
+  validate({ body: guestReconcileCardPaymentSchema }),
+  paymentController.guestReconcileCardPayment,
+);
 
 router.use(authenticate);
 

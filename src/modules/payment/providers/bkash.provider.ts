@@ -97,9 +97,23 @@ const toJson = (value: unknown): Prisma.InputJsonValue =>
   JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 
 const parseHttpsRedirectUrl = (value: string): string | undefined => {
+  const clean = value.trim().replace(/^(["']+)|(["']+)$/g, "").trim();
+
+  if (!clean || /\s/.test(clean)) {
+    return undefined;
+  }
+
   try {
-    const url = new URL(value);
-    return url.protocol === "https:" ? url.toString() : undefined;
+    const url = new URL(clean);
+    if (
+      url.protocol !== "https:" ||
+      !url.hostname ||
+      url.username ||
+      url.password
+    ) {
+      return undefined;
+    }
+    return url.toString();
   } catch {
     return undefined;
   }
@@ -173,6 +187,15 @@ const requestToken = async (): Promise<CachedToken> => {
   const token = getString(data.id_token);
 
   if (!gateway.httpOk || !gateway.isUsableJson || !token) {
+    console.error("[bkash] token grant failed", {
+      operation: "token grant",
+      httpStatus: gateway.httpStatus,
+      responseStatus: readField(data, ["statusCode", "status"]),
+      responseMessage:
+        readField(data, ["statusMessage", "errorMessage"]) || undefined,
+      hasToken: Boolean(token),
+    });
+
     const providerMessage = gatewayErrorMessage(
       data,
       "statusMessage",
@@ -502,21 +525,46 @@ export const bkashProvider: PaymentProvider = {
       "payment create",
     );
     const data = gateway.data;
-    const rawBkashUrl = getString(data.bkashURL);
+    // bKash is inconsistent with key casing between sandbox and live responses.
+    const rawBkashUrl = readField(data, ["bkashURL"]);
     const bkashUrl = parseHttpsRedirectUrl(rawBkashUrl);
-    const paymentId = getString(data.paymentID);
+    const paymentId = readField(data, ["paymentID", "paymentId"]);
+    const returnedInvoice = readField(data, ["merchantInvoiceNumber"]);
 
     if (
       !gateway.httpOk ||
       !gateway.isUsableJson ||
       !bkashUrl ||
-      !paymentId
+      !paymentId ||
+      (returnedInvoice !== "" && returnedInvoice !== order.orderNumber)
     ) {
+      // Keep diagnostics explicit without leaking credentials or tokens.
+      console.error("[bkash] payment create failed", {
+        operation: "payment create",
+        httpStatus: gateway.httpStatus,
+        callbackUrl,
+        orderNumber: order.orderNumber,
+        responseStatus: readField(data, ["statusCode", "status"]),
+        responseMessage:
+          readField(data, ["statusMessage", "errorMessage"]) || undefined,
+        hasBkashUrl: Boolean(bkashUrl),
+        hasPaymentId: Boolean(paymentId),
+        invoiceMismatch:
+          returnedInvoice !== "" && returnedInvoice !== order.orderNumber,
+      });
+
       const providerMessage = gatewayErrorMessage(
         data,
         "statusMessage",
         "errorMessage",
       );
+
+      if (returnedInvoice !== "" && returnedInvoice !== order.orderNumber) {
+        throw new ApiError(
+          502,
+          "bKash returned a payment for a different invoice. Please retry the payment.",
+        );
+      }
 
       throw new ApiError(
         502,

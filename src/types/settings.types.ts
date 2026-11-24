@@ -8,6 +8,8 @@ export interface HomeCategorySectionResponse {
   sortOrder: number;
 }
 
+import type { DiscountType } from "@prisma/client";
+
 export interface SettingsResponse {
   id: string;
   siteName: string;
@@ -26,6 +28,15 @@ export interface SettingsResponse {
   bkashEnabled: boolean;
   nagadEnabled: boolean;
   stripeEnabled: boolean;
+  /** Shipping is a separate line item; disabled means free shipping (fee = 0). */
+  shippingEnabled: boolean;
+  shippingFee: number;
+  freeShippingThreshold: number;
+  /** Automatic store-wide discount applied to eligible product subtotals. */
+  flatDiscountEnabled: boolean;
+  flatDiscountType: DiscountType | null;
+  flatDiscountValue: number;
+  flatDiscountMinAmount: number | null;
   categorySections: HomeCategorySectionResponse[];
   /** Convenience list of category ids whose home section is currently visible. */
   visibleCategoryIds: string[];
@@ -54,6 +65,13 @@ export interface UpdateSettingsInput {
   bkashEnabled?: boolean;
   nagadEnabled?: boolean;
   stripeEnabled?: boolean;
+  shippingEnabled?: boolean;
+  shippingFee?: number;
+  freeShippingThreshold?: number;
+  flatDiscountEnabled?: boolean;
+  flatDiscountType?: DiscountType | null;
+  flatDiscountValue?: number;
+  flatDiscountMinAmount?: number | null;
   categorySections?: HomeCategorySectionInput[];
 }
 

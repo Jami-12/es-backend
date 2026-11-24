@@ -7,8 +7,8 @@ import { prisma } from "../../config/prisma";
 import { ApiError } from "../../utils/ApiError";
 import { recordAudit } from "../../utils/audit";
 import { endOfDay, startOfDay } from "../../utils/dateRange";
-import { effectivePrice } from "../../utils/money";
 import { buildPaginationMeta } from "../../utils/pagination";
+import { resolveProductPricing } from "../../utils/productPricing";
 import type { AuthenticatedUser } from "../../types/auth.types";
 import type {
   AdjustStockInput,
@@ -30,8 +30,19 @@ const inventoryProductSelect = {
   purchasePrice: true,
   price: true,
   discountPrice: true,
+  isDiscountActive: true,
   status: true,
   updatedAt: true,
+  discount: {
+    select: {
+      id: true,
+      discountType: true,
+      discountValue: true,
+      startDate: true,
+      endDate: true,
+      isActive: true,
+    },
+  },
   category: { select: { id: true, name: true } },
 } satisfies Prisma.ProductSelect;
 
@@ -40,10 +51,13 @@ type InventoryProduct = Prisma.ProductGetPayload<{
 }>;
 
 const toInventoryItem = (product: InventoryProduct): InventoryItem => {
-  const sellingPrice = effectivePrice(
+  const sellingPrice = resolveProductPricing(
     product.price,
+    product.discount,
+    new Date(),
     product.discountPrice,
-  ).toNumber();
+    product.isDiscountActive,
+  ).finalPrice.toNumber();
   const purchasePrice = product.purchasePrice.toNumber();
 
   return {
@@ -153,6 +167,17 @@ export const getInventoryOverview = async (): Promise<InventoryOverview> => {
         purchasePrice: true,
         price: true,
         discountPrice: true,
+        isDiscountActive: true,
+        discount: {
+          select: {
+            id: true,
+            discountType: true,
+            discountValue: true,
+            startDate: true,
+            endDate: true,
+            isActive: true,
+          },
+        },
       },
     }),
     prisma.product.count({ where: { stock: { lte: 0 } } }),
@@ -164,13 +189,17 @@ export const getInventoryOverview = async (): Promise<InventoryOverview> => {
     }),
   ]);
 
+  const now = new Date();
   const values = products.reduce(
     (accumulator, product) => {
       const purchasePrice = product.purchasePrice.toNumber();
-      const sellingPrice = effectivePrice(
+      const sellingPrice = resolveProductPricing(
         product.price,
+        product.discount,
+        now,
         product.discountPrice,
-      ).toNumber();
+        product.isDiscountActive,
+      ).finalPrice.toNumber();
 
       accumulator.cost += purchasePrice * product.stock;
       accumulator.potential += sellingPrice * product.stock;

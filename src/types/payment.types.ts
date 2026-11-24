@@ -23,12 +23,24 @@ export interface InitiatePaymentInput {
   method?: PaymentMethod;
 }
 
+/** Public guest payment input. The token replaces the bearer authentication. */
+export interface GuestInitiatePaymentInput extends InitiatePaymentInput {
+  guestToken: string;
+}
+
+export interface GuestReconcileCardPaymentInput {
+  orderId: string;
+  guestToken: string;
+}
+
 export interface InitiatePaymentResult {
   payment: PaymentResponse;
   method: PaymentMethod;
   paymentStatus: PaymentStatus;
   message: string;
   redirectUrl?: string;
+  /** Canonical bKash checkout URL field, mirrored to the storefront client. */
+  bkashURL?: string | null;
   clientSecret?: string;
   providerPaymentId?: string | null;
 }
